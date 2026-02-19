@@ -3,6 +3,7 @@ const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const authRoutes = require('./routes/auth');
+const fileRoutes = require('./routes/files');  // ADD THIS
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,7 +16,7 @@ app.use(express.json());
 
 // Global rate limiter
 app.use(rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
+    windowMs: 15 * 60 * 1000,
     max: 200,
     message: { error: 'Too many requests' },
 }));
@@ -29,6 +30,7 @@ const authLimiter = rateLimit({
 
 // Routes
 app.use('/api/auth', authLimiter, authRoutes);
+app.use('/api/files', fileRoutes);  // ADD THIS
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
