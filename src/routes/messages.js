@@ -52,6 +52,18 @@ function decryptMessage(row, keyVersion) {
             ).toString('utf8');
         } catch { fileName = 'File'; }
     }
+    // Decrypt reply_to text if present
+    let replyToContent = null;
+    if (row.rt_content && row.rt_content_iv && row.rt_content_tag) {
+        try {
+            replyToContent = decrypt(
+                Buffer.from(row.rt_content, 'hex'),
+                row.rt_content_iv,
+                row.rt_content_tag,
+                parseInt(row.rt_key_version || keyVersion, 10)
+            ).toString('utf8');
+        } catch { replyToContent = '[message]'; }
+    }
     return {
         id: row.id,
         sender_id: row.sender_id,
@@ -62,7 +74,17 @@ function decryptMessage(row, keyVersion) {
         file_name: fileName,
         file_size: row.file_size_bytes || null,
         mime_type: row.file_mime_type || null,
-        reply_to_id: row.reply_to_id,
+        reply_to_id: row.reply_to_id || null,
+        reply_to: row.reply_to_id ? {
+            id: row.reply_to_id,
+            type: row.rt_type || 'text',
+            content: replyToContent,
+            file_id: row.rt_file_id || null,
+            sender_id: row.rt_sender_id || null,
+        } : null,
+        view_once: row.view_once || false,
+        view_max: row.view_max || 1,
+        view_count: row.view_count || 0,
         is_deleted: row.is_deleted,
         is_read: row.is_read,
         read_at: row.read_at,
@@ -88,18 +110,29 @@ router.get('/', authMiddleware, async (req, res) => {
                 f.file_size_bytes,
                 f.encrypted_name, f.name_iv, f.name_auth_tag,
                 f.key_version as file_key_version,
+                CASE WHEN m.view_once = TRUE AND m.view_count >= COALESCE(m.view_max,1) AND m.receiver_id = $1
+                     THEN NULL ELSE m.file_id END as file_id,
+                rt.type        as rt_type,
+                rt.sender_id   as rt_sender_id,
+                rt.file_id     as rt_file_id,
+                rt.content     as rt_content,
+                rt.content_iv  as rt_content_iv,
+                rt.content_tag as rt_content_tag,
+                rt.key_version as rt_key_version,
                 COALESCE(
                     json_agg(json_build_object('emoji', mr.emoji, 'user_id', mr.user_id))
                     FILTER (WHERE mr.id IS NOT NULL), '[]'
                 ) AS reactions
              FROM messages m
              LEFT JOIN files f ON f.id = m.file_id
+             LEFT JOIN messages rt ON rt.id = m.reply_to_id
              LEFT JOIN message_reactions mr ON mr.message_id = m.id
              WHERE ((m.sender_id = $1 AND m.receiver_id = $2)
                  OR (m.sender_id = $2 AND m.receiver_id = $1))
                AND m.is_deleted = FALSE
                AND m.created_at < $3
-             GROUP BY m.id, f.mime_type, f.file_size_bytes, f.encrypted_name, f.name_iv, f.name_auth_tag, f.key_version
+             GROUP BY m.id, f.mime_type, f.file_size_bytes, f.encrypted_name, f.name_iv, f.name_auth_tag, f.key_version,
+                      rt.type, rt.sender_id, rt.file_id, rt.content, rt.content_iv, rt.content_tag, rt.key_version
              ORDER BY m.created_at DESC
              LIMIT $4`,
             [myId, partnerId, before, limit]
@@ -139,6 +172,30 @@ router.post('/', authMiddleware, async (req, res) => {
 
         const msg = decryptMessage(result.rows[0], keyVersion);
 
+        // Fetch reply_to content so socket payload includes the full quote
+        if (reply_to_id) {
+            try {
+                const rtRes = await pool.query(
+                    `SELECT type, sender_id, file_id, content, content_iv, content_tag, key_version FROM messages WHERE id = $1`,
+                    [reply_to_id]
+                );
+                if (rtRes.rows.length > 0) {
+                    const rt = rtRes.rows[0];
+                    let replyToContent = null;
+                    if (rt.type === 'text' && rt.content && rt.content_iv && rt.content_tag) {
+                        try {
+                            replyToContent = decrypt(
+                                Buffer.from(rt.content, 'hex'),
+                                rt.content_iv, rt.content_tag,
+                                parseInt(rt.key_version || keyVersion, 10)
+                            ).toString('utf8');
+                        } catch { replyToContent = '[message]'; }
+                    }
+                    msg.reply_to = { id: reply_to_id, type: rt.type, content: replyToContent, file_id: rt.file_id, sender_id: rt.sender_id };
+                }
+            } catch { /* non-fatal */ }
+        }
+
         // Emit real-time event
         const socketState = require('../socket');
         const roomId = [myId, partnerId].sort().join('_');
@@ -152,6 +209,7 @@ router.post('/', authMiddleware, async (req, res) => {
     }
 });
 
+
 // ══════════════════════════════════════════════
 // POST /api/messages/media — send media file
 // Reuses existing file encryption system
@@ -164,6 +222,8 @@ router.post('/media', authMiddleware, upload.single('file'), async (req, res) =>
         const myId = req.user.sub;
         const partnerId = await getPartnerId(myId);
         const keyVersion = await getActiveKeyVersion();
+        const viewOnce = req.body?.view_once === 'true' || req.body?.view_once === true;
+        const viewMax = parseInt(req.body?.view_max) || 1;
 
         // Determine message type
         let type = 'file';
@@ -191,11 +251,11 @@ router.post('/media', authMiddleware, upload.single('file'), async (req, res) =>
         );
         const fileId = fileResult.rows[0].id;
 
-        // Insert into messages table
+        // Insert into messages table (with view_once support)
         const msgResult = await pool.query(
-            `INSERT INTO messages (sender_id, receiver_id, type, file_id, key_version)
-             VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-            [myId, partnerId, type, fileId, keyVersion]
+            `INSERT INTO messages (sender_id, receiver_id, type, file_id, key_version, view_once, view_max)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+            [myId, partnerId, type, fileId, keyVersion, viewOnce, viewMax]
         );
 
         const msg = {
@@ -209,7 +269,7 @@ router.post('/media', authMiddleware, upload.single('file'), async (req, res) =>
         const roomId = [myId, partnerId].sort().join('_');
         socketState.getIo()?.to(roomId).emit('new_message', msg);
 
-        console.log(`[MESSAGES] 📎 Media sent: ${req.user.email} → partner (${type})`);
+        console.log(`[MESSAGES] 📎 Media sent: ${req.user.email} → partner (${type}${viewOnce ? ' view-once' : ''})`);
         return res.status(201).json({ message: msg });
     } catch (err) {
         console.error('[MESSAGES] POST /media error:', err.message);
@@ -218,6 +278,7 @@ router.post('/media', authMiddleware, upload.single('file'), async (req, res) =>
 });
 
 // ══════════════════════════════════════════════
+
 // DELETE /api/messages/:id — soft delete
 // ══════════════════════════════════════════════
 router.delete('/:id', authMiddleware, async (req, res) => {
@@ -268,6 +329,36 @@ router.put('/:id/read', authMiddleware, async (req, res) => {
     } catch (err) {
         console.error('[MESSAGES] PUT /read error:', err.message);
         return res.status(500).json({ error: 'Failed to mark read' });
+    }
+});
+
+// ══════════════════════════════════════════════
+// POST /api/messages/:id/viewed — view-once tracking
+// ══════════════════════════════════════════════
+router.post('/:id/viewed', authMiddleware, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const myId = req.user.sub;
+        // Increment view count and return new count
+        const result = await pool.query(
+            `UPDATE messages SET view_count = COALESCE(view_count, 0) + 1
+             WHERE id = $1 AND receiver_id = $2 AND view_once = TRUE
+             RETURNING view_count, view_max`,
+            [id, myId]
+        );
+        if (!result.rows.length) return res.json({ ok: true, already: true });
+        const { view_count, view_max } = result.rows[0];
+        const exhausted = view_count >= (view_max || 1);
+
+        const socketState = require('../socket');
+        const partnerId = await getPartnerId(myId);
+        const roomId = [myId, partnerId].sort().join('_');
+        socketState.getIo()?.to(roomId).emit('view_once_opened', { messageId: id, viewCount: view_count, exhausted });
+
+        return res.json({ ok: true, view_count, exhausted });
+    } catch (err) {
+        console.error('[MESSAGES] POST /viewed error:', err.message);
+        return res.status(500).json({ error: 'Failed to record view' });
     }
 });
 
