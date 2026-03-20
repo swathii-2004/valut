@@ -1,6 +1,7 @@
 import { Stack, router } from 'expo-router';
 import { useEffect } from 'react';
 import { AuthProvider, useAuth } from '../context/AuthContext';
+import { ThemeProvider } from '../context/ThemeContext';
 import { ActivityIndicator, View } from 'react-native';
 
 function RootLayoutNav() {
@@ -38,7 +39,9 @@ function RootLayoutNav() {
 export default function RootLayout() {
   return (
     <AuthProvider>
-      <RootLayoutNav />
+      <ThemeProvider>
+        <RootLayoutNav />
+      </ThemeProvider>
     </AuthProvider>
   );
 }
