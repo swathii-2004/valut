@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
+const authMiddleware = require('../middleware/auth');
 require('dotenv').config();
 
 const router = express.Router();
@@ -65,14 +66,23 @@ router.post('/register', async (req, res) => {
 // POST /api/auth/login
 router.post('/login', async (req, res) => {
     const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    console.log(`\n[LOGIN] 📩 Request from ${req.ip}`);
+    console.log(`[LOGIN] Email: ${email}`);
+    if (!email || !password) {
+        console.log('[LOGIN] ❌ Missing email or password');
+        return res.status(400).json({ error: 'Email and password required' });
+    }
 
     try {
         const result = await pool.query('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+        console.log(`[LOGIN] DB lookup: ${result.rows.length} user(s) found`);
         const user = result.rows[0];
 
         // Same error for wrong email or wrong password — prevent user enumeration
-        if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!user) {
+            console.log('[LOGIN] ❌ No user found with that email');
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
 
         // Check lockout
         if (user.locked_until && new Date(user.locked_until) > new Date()) {
@@ -81,6 +91,7 @@ router.post('/login', async (req, res) => {
         }
 
         const isValid = await bcrypt.compare(password, user.password_hash);
+        console.log(`[LOGIN] Password check: ${isValid ? '✅ valid' : '❌ invalid'}`);
 
         if (!isValid) {
             const newCount = user.failed_attempts + 1;
@@ -93,6 +104,7 @@ router.post('/login', async (req, res) => {
                 [newCount, lockout, user.id]
             );
             await logAccess(user.id, 'login_failure', req, { success: false });
+            console.log(`[LOGIN] ❌ Failed attempts: ${newCount}`);
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
@@ -116,6 +128,7 @@ router.post('/login', async (req, res) => {
         );
 
         await logAccess(user.id, 'login_success', req, { success: true });
+        console.log(`[LOGIN] ✅ Success! Token issued for ${user.email}`);
 
         res.json({ access_token: accessToken, refresh_token: refreshToken });
     } catch (err) {
@@ -176,8 +189,8 @@ router.post('/refresh', async (req, res) => {
 });
 
 // POST /api/auth/logout
-router.post('/logout', async (req, res) => {
-    const { refresh_token } = req.body;
+router.post('/logout', authMiddleware, async (req, res) => {
+    const { refresh_token } = req.body || {};
 
     try {
         if (refresh_token) {
