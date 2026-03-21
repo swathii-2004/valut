@@ -492,3 +492,64 @@ Phone must be on same WiFi as PC.
 - [x] Token key mismatch fixed
 
 *Phase 6 completed March 19, 2026.*
+
+---
+
+## 💬 Phase 7 — Advanced Real-Time Chat & UI Overhaul
+
+> Completed: March 20, 2026 — Phase 7 COMPLETE ✅
+
+### New Features & Enhancements
+
+#### 1. Backend & Schema Extensibility (`couple-vault-api`)
+- Added `message_reactions` table with `message_id`, `user_id`, and `emoji`
+- Fixed `message_reactions` constraints (added UNIQUE index on `message_id, user_id` and granted full schema permissions to `vault_app`)
+- Refactored `GET /api/messages` to:
+  - Return encrypted `reply_to` contents via self-JOIN.
+  - Return `view_once`, `view_max`, and `view_count` metadata.
+  - Omit `file_id` returning `null` if a view-once limit is reached.
+- Added `POST /api/messages/:id/viewed` to track ephemeral media views.
+- Updated `POST /api/messages/media` to accept `view_once` / `view_max`.
+
+#### 2. Enhanced Native Playback (`app/view.js`)
+- Replaced WebViews with Expo native components where appropriate.
+- Video playback now fully utilizes `expo-video` with `nativeControls`.
+- Implemented robust mime-type mapping for `mp4`, `webm`, `mov`, `mp3`, `m4a`.
+- Added a full custom `AudioPlayer` component utilizing `expo-av` with a progress bar and timestamp logic for viewing shared audio.
+
+#### 3. Voice Messages (`chat.js`)
+- Integrated `expo-av` Audio recording.
+- Overhauled input bar with a multi-purpose send/mic button (tap to send text, hold to record audio).
+- Implemented real-time recording timer UI.
+- Implemented inline `VoiceBubble` component for playing audio directly inside the chat timeline without opening a separate viewer.
+
+#### 4. WhatsApp-Style Message Interactions
+- Replaced basic menus with a custom long-press dimmed Action Overlay (`waOverlay`).
+- Action Overlay includes a selected message preview (with reply quote context), a horizontal Emoji reaction bar (`❤️ 😂 😮 😢 😡 👍 🔥 💜`), and Reply/Delete actions.
+- Reply Quotes now use a high-contrast dark block with an "↩ Reply" label, visible across all themes.
+
+#### 5. Ephemeral Media (View-Once)
+- Media preview modal now features a format selector: `Normal`, `👁 Once`, `👁👁 Twice`.
+- Sender view automatically shows "👁 Opened" when the recipient exhausts the view count.
+- Recipient side shows a tap-to-view "👁" bubble if they have unseen view-once media.
+- Views are broadcast in real-time via Socket.IO (`view_once_opened`).
+
+#### 6. Expressive Content
+- Integrated Tenor v2 GIF searchable component modal (`app/chat.js`).
+- Implemented a +300 custom Sticker pack drawer containing categories like 'Emotions', 'Animals', 'Food', 'Activities', 'Travel', 'Objects', 'Symbols'.
+- Sticker modal includes visual tabs and a text-based filter.
+
+#### 7. Theming & Authentication Visuals
+- Integrated `ThemeContext` providing 5 distinct aesthetic Chat Palettes (Default Dark, Sakura Pink, Ocean Blue, Midnight Purple, Mint Green).
+- Chat dynamic styling binds across all bubble borders, buttons, timestamp texts.
+- Fully redesigned `login.js` avoiding basic black/white and utilizing modern gradient layouts matching the new aesthetics.
+
+### How to Run
+`
+Terminal 1: cd C:\Users\91812\Desktop\valut\couple-vault-api && node src/server.js
+Terminal 2: & "C:\Program Files (x86)\cloudflared\cloudflared.exe" tunnel run couple-vault
+Terminal 3: cd C:\Users\91812\Desktop\valut\couple-vault-app && npx expo start --lan
+`
+
+*Phase 7 completed March 20, 2026.*
+
