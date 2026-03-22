@@ -21,7 +21,8 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "softwareKeyboardLayoutMode": "pan",
-      "package": "com.subbu1190.couplevaultapp"
+      "package": "com.subbu1190.couplevaultapp",
+      "googleServicesFile": "./google-services.json"
     },
     "androidStatusBar": {
       "backgroundColor": "#ffffff",
