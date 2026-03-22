@@ -77,7 +77,7 @@ const THEMES = {
   },
   forest: {
     name: 'Forest',
-    icon: '🌿',
+    icon: '💚',
     bg: '#F0FDF4',
     surface: '#FFFFFF',
     accent: '#16A34A',
@@ -93,6 +93,24 @@ const THEMES = {
     timeSent: 'rgba(255,255,255,0.7)',
     datePill: '#DCFCE7',
   },
+  vault: {
+    name: 'Vault',
+    icon: '💜',
+    bg: '#1A0035',
+    surface: '#2A0050',
+    accent: '#C47DFF',
+    accentSoft: '#3D0078',
+    bubbleSent: '#8B2FC9',
+    bubbleReceived: '#2D0060',
+    textPrimary: '#F0E6FF',
+    textSec: '#A07ACC',
+    border: '#4A0090',
+    header: '#200045',
+    inputBg: '#1A0035',
+    time: '#7A55AA',
+    timeSent: 'rgba(240,230,255,0.55)',
+    datePill: '#3D0070',
+  },
 };
 
 const ThemeContext = createContext(null);
@@ -103,13 +121,13 @@ export function ThemeProvider({ children }) {
   useEffect(() => {
     AsyncStorage.getItem('chat_theme').then(saved => {
       if (saved && THEMES[saved]) setThemeKey(saved);
-    }).catch(() => {});
+    }).catch(() => { });
   }, []);
 
   const switchTheme = async (key) => {
     if (!THEMES[key]) return;
     setThemeKey(key);
-    try { await AsyncStorage.setItem('chat_theme', key); } catch {}
+    try { await AsyncStorage.setItem('chat_theme', key); } catch { }
   };
 
   return (

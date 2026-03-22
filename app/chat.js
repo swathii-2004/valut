@@ -2,17 +2,24 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity, StyleSheet,
   KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
-  Dimensions, Modal, Pressable, ScrollView, SafeAreaView, PanResponder,
+  Dimensions, Modal, Pressable, ScrollView, SafeAreaView, AppState
 } from 'react-native';
+import Animated, { useSharedValue, withRepeat, withTiming, withSequence, withDelay } from 'react-native-reanimated';
+import { Swipeable } from 'react-native-gesture-handler';
 import { Image } from 'expo-image';
+import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as LegacyFS from 'expo-file-system/legacy';
+import * as Haptics from 'expo-haptics';
+import * as Clipboard from 'expo-clipboard';
 import { Audio } from 'expo-av';
 import { io } from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EMOJI_CATEGORIES, searchEmojis } from '../data/emojis';
 import apiClient from '../api/client';
 
@@ -33,14 +40,71 @@ function formatDateLabel(d) {
   if (date.toDateString() === yest.toDateString()) return 'Yesterday';
   return date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
-function sameDay(a, b) { return new Date(a).toDateString() === new Date(b).toDateString(); }
+function sameDay(a, b) {
+  const d1 = new Date(a); const d2 = new Date(b);
+  return d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
+}
 function formatBytes(b) {
   if (!b) return '';
   return b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
 }
+// Helper: detect reply type and return WhatsApp-style label + thumbnail
+function getReplyPreview(r, mediaUrlFn) {
+  if (!r) return { label: 'Message', isMedia: false };
+  const c = r.content || '';
+  const isGifUrl = c.startsWith('http') && (c.includes('tenor.com') || c.includes('gstatic.com') || c.includes('giphy.com') || c.endsWith('.gif'));
+  if (r.type === 'gif' || isGifUrl) return { label: 'GIF 🎬', isMedia: true, uri: c };
+  if (r.type === 'image') return { label: 'Photo 📷', isMedia: true, uri: r.file_id && mediaUrlFn ? mediaUrlFn(r.file_id) : null };
+  if (r.type === 'video') return { label: 'Video 🎥', isMedia: false };
+  if (r.type === 'audio') return { label: 'Voice message 🎤', isMedia: false };
+  if (r.type === 'file') return { label: '📄 ' + (r.file_name || 'File'), isMedia: false };
+  return { label: c.slice(0, 40) || 'Message', isMedia: false };
+}
+
+const ConfettiParticle = ({ delay, x }) => {
+  const fall = useRef(new Animated.Value(-50)).current;
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.delay(delay),
+        Animated.timing(fall, { toValue: SCREEN_W * 2.5, duration: 2500, useNativeDriver: true })
+      ])
+    ).start();
+  }, [delay, fall]);
+  const rotate = fall.interpolate({ inputRange: [-50, 800], outputRange: ['0deg', '360deg'] });
+  const emojis = ['🎈', '🎂', '🎊', '🎉', '🎁', '✨', '🍰'];
+  const emoji = useRef(emojis[Math.floor(Math.random() * emojis.length)]).current;
+  return (
+    <Animated.Text style={{ position: 'absolute', left: x, fontSize: 24, transform: [{ translateY: fall }, { rotate }] }}>
+      {emoji}
+    </Animated.Text>
+  );
+};
+
+const ConfettiOverlay = ({ active }) => {
+  const particles = useRef(Array.from({ length: 30 }).map((_, i) => ({
+    id: i, delay: Math.random() * 2000, x: Math.random() * SCREEN_W
+  }))).current;
+  if (!active) return null;
+  return (
+    <View style={[StyleSheet.absoluteFill, { zIndex: 9999, pointerEvents: 'none', overflow: 'hidden' }]}>
+      {particles.map(p => <ConfettiParticle key={p.id} delay={p.delay} x={p.x} />)}
+    </View>
+  );
+};
+
+const isBirthdayMessage = (text) => {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return lower.includes('happy birthday') || lower.includes('hbd');
+};
 
 // ── Message Bubble ────────────────────────────────────────
-function MessageBubble({ msg, myId, token, C, onLongPress, onImagePress }) {
+const MessageBubble = React.memo(({ msg, myId, token, C, onLongPress, onImagePress, onSwipeToReply, onQuotePress }) => {
+  // Helper: build authenticated media URL using ?token= query param
+  // (expo-image on Android ignores custom Authorization headers for image sources)
+  const mediaUrl = (fileId) => `${BASE_URL}/api/files/${fileId}/view?token=${token}`;
+
   const isMine = msg.sender_id === myId;
   const reactions = msg.reactions?.filter(r => r.emoji) || [];
 
@@ -51,96 +115,227 @@ function MessageBubble({ msg, myId, token, C, onLongPress, onImagePress }) {
   const handleViewOnce = async () => {
     // Navigate to view, then mark as viewed
     onImagePress?.(msg);
-    try { await apiClient.post(`/api/messages/${msg.id}/viewed`); } catch {}
+    try { await apiClient.post(`/api/messages/${msg.id}/viewed`); } catch { }
   };
-  return (
-    <View style={[bs.bubbleWrap, isMine ? bs.bubbleWrapRight : bs.bubbleWrapLeft]}>
-      {msg.reply_to && (
-        <View style={[bs.replyQuote, {
-          backgroundColor: isMine ? 'rgba(0,0,0,0.18)' : 'rgba(0,0,0,0.07)',
-          borderLeftColor: isMine ? 'rgba(255,255,255,0.85)' : C.accent,
-        }]}>
-          <Text style={[bs.replyQuoteLabel, { color: isMine ? 'rgba(255,255,255,0.7)' : C.accent }]}>
-            {msg.reply_to.type === 'text' ? '↩ Reply' : '↩ Media'}
-          </Text>
-          <Text style={[bs.replyQuoteText, { color: isMine ? 'rgba(255,255,255,0.9)' : C.textPrimary }]} numberOfLines={2}>
-            {msg.reply_to.content || (msg.reply_to.type === 'image' ? '📷 Photo' : msg.reply_to.type === 'video' ? '🎬 Video' : '📄 File')}
-          </Text>
-        </View>
-      )}
-      <TouchableOpacity
-        activeOpacity={0.85}
-        onLongPress={() => onLongPress?.(msg)}
-        style={[bs.bubble,
-          { backgroundColor: isMine ? C.bubbleSent : C.bubbleReceived },
-          !isMine && { borderWidth: 1, borderColor: C.border },
-          isMine ? bs.bubbleSentRadius : bs.bubbleRecvRadius,
-        ]}
-      >
-        {/* View-once exhausted */}
-        {isViewOnceExhausted && (
-          <View style={bs.viewOnceOpened}>
-            <Text style={[bs.viewOnceText, { color: isMine ? 'rgba(255,255,255,0.6)' : C.textSec }]}>👁 Opened</Text>
-          </View>
-        )}
-        {/* View-once not yet opened */}
-        {isViewOnce && (
-          <TouchableOpacity style={[bs.viewOnceBubble, { backgroundColor: isMine ? 'rgba(255,255,255,0.15)' : C.accentSoft }]} onPress={handleViewOnce}>
-            <Text style={{ fontSize: 28 }}>👁</Text>
-            <Text style={[bs.viewOnceLabel, { color: isMine ? '#fff' : C.accent }]}>
-              {msg.view_max === 2 ? 'Tap to view (×2)' : 'Tap to view once'}
-            </Text>
-          </TouchableOpacity>
-        )}
-        {msg.type === 'text' && !msg.is_deleted && !isViewOnce && !isViewOnceExhausted && (
-          <Text style={[bs.bubbleText, { color: isMine ? '#fff' : C.textPrimary }]}>{msg.content}</Text>
-        )}
-        {msg.is_deleted && <Text style={bs.deletedText}>Message deleted</Text>}
 
-        {msg.type === 'image' && msg.file_id && !msg.view_once && (
-          <TouchableOpacity onPress={() => onImagePress?.(msg)}>
-            <Image
-              source={{ uri: `${BASE_URL}/api/files/${msg.file_id}/view`, headers: { Authorization: `Bearer ${token}` } }}
-              style={bs.imageThumb}
-              contentFit="cover"
-            />
-          </TouchableOpacity>
-        )}
-        {msg.type === 'video' && !msg.view_once && (
-          <TouchableOpacity style={bs.mediaRow} onPress={() => onImagePress?.(msg)}>
-            <View style={[bs.mediaIconBox, { backgroundColor: 'rgba(255,255,255,0.25)' }]}>
-              <Text style={bs.mediaIconText}>▶</Text>
-            </View>
-            <Text style={[bs.bubbleText, { color: isMine ? '#fff' : C.textPrimary }]} numberOfLines={1}>{msg.file_name || 'Video'}</Text>
-          </TouchableOpacity>
-        )}
-        {msg.type === 'audio' && msg.file_id && (
-          <VoiceBubble msg={msg} myId={myId} token={token} C={C} />
-        )}
-        {msg.type === 'file' && (
-          <View style={bs.mediaRow}>
-            <View style={[bs.mediaIconBox, { backgroundColor: 'rgba(255,255,255,0.25)' }]}>
-              <Text style={bs.mediaIconText}>↓</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[bs.bubbleText, { color: isMine ? '#fff' : C.textPrimary }]} numberOfLines={1}>{msg.file_name || 'File'}</Text>
-              {msg.file_size ? <Text style={[bs.fileSizeText, { color: isMine ? 'rgba(255,255,255,0.5)' : C.textSec }]}>{formatBytes(msg.file_size)}</Text> : null}
-            </View>
-          </View>
-        )}
-        <View style={bs.bubbleMeta}>
-          <Text style={[bs.timeText, { color: isMine ? C.timeSent : C.time }]}>{formatTime(msg.created_at)}</Text>
-          {isMine && <Text style={[bs.readTick, { color: msg.is_read ? C.accentSoft : 'rgba(255,255,255,0.4)' }]}>{msg.is_read ? ' ✓✓' : ' ✓'}</Text>}
-        </View>
-      </TouchableOpacity>
-      {reactions.length > 0 && (
-        <View style={[bs.reactionsRow, { backgroundColor: C.surface, borderColor: C.border }, isMine ? bs.reactRight : bs.reactLeft]}>
-          {reactions.map((r, i) => <Text key={i} style={bs.reactionEmoji}>{r.emoji}</Text>)}
-        </View>
-      )}
+  const renderReplyAction = () => (
+    <View style={{ justifyContent: 'center', alignItems: 'center', paddingHorizontal: 16 }}>
+      <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: C.accentSoft, justifyContent: 'center', alignItems: 'center' }}>
+        <Ionicons name="return-down-back" size={20} color={C.accent} />
+      </View>
     </View>
   );
-}
+
+  const bubbleContent = (
+    <View style={[
+      bs.bubbleWrap,
+      isMine ? bs.bubbleWrapRight : bs.bubbleWrapLeft,
+      msg.type === 'thinking_of_you' && { backgroundColor: '#FF477E', borderWidth: 0, padding: 4 }
+    ]}>
+      {msg.reply_to && (() => {
+        const rp = getReplyPreview(msg.reply_to, mediaUrl);
+        return (
+          <TouchableOpacity
+            activeOpacity={0.7}
+            onPress={() => onQuotePress?.(msg.reply_to.id)}
+            style={[bs.replyQuote, {
+              backgroundColor: isMine ? 'rgba(0,0,0,0.18)' : 'rgba(0,0,0,0.07)',
+              borderLeftColor: isMine ? 'rgba(255,255,255,0.85)' : C.accent,
+              flexDirection: 'row', alignItems: 'center',
+            }]}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={[bs.replyQuoteLabel, { color: isMine ? 'rgba(255,255,255,0.7)' : C.accent }]}>
+                ↩ Reply
+              </Text>
+              <Text style={[bs.replyQuoteText, { color: isMine ? 'rgba(255,255,255,0.9)' : C.textPrimary }]} numberOfLines={1}>
+                {rp.label}
+              </Text>
+            </View>
+            {rp.isMedia && rp.uri && (
+              <Image source={{ uri: rp.uri }} style={{ width: 36, height: 36, borderRadius: 6, marginLeft: 8 }} contentFit="cover" />
+            )}
+          </TouchableOpacity>
+        );
+      })()}
+      {/* Wrapper for bubble + overlapping reaction pill */}
+      <View style={{ position: 'relative', marginBottom: reactions.length > 0 ? 18 : 0 }}>
+        <TouchableOpacity
+          activeOpacity={0.85}
+          onLongPress={() => onLongPress?.(msg)}
+          style={[bs.bubble,
+          { backgroundColor: isMine ? C.bubbleSent : C.bubbleReceived },
+          msg.type === 'text' && isBirthdayMessage(msg.content) && { backgroundColor: '#FFD1DC', borderWidth: 2, borderColor: '#FF9EBB' },
+          !isMine && { borderWidth: 1, borderColor: C.border },
+          isMine ? bs.bubbleSentRadius : bs.bubbleRecvRadius,
+          ]}
+        >
+          {msg.type === 'text' && isBirthdayMessage(msg.content) && (
+            <View style={{ backgroundColor: 'rgba(255,255,255,0.4)', borderRadius: 8, padding: 4, marginBottom: 4, alignItems: 'center' }}>
+              <Text style={{ fontSize: 12, fontWeight: 'bold', color: '#E4387A' }}>🎉 Birthday Wish!</Text>
+            </View>
+          )}
+          {/* View-once exhausted */}
+          {isViewOnceExhausted && (
+            <View style={bs.viewOnceOpened}>
+              <Ionicons name="eye-off-outline" size={16} color={isMine ? 'rgba(255,255,255,0.6)' : C.textSec} />
+              <Text style={[bs.viewOnceText, { color: isMine ? 'rgba(255,255,255,0.6)' : C.textSec, marginLeft: 4 }]}>Opened</Text>
+            </View>
+          )}
+          {/* Sender view-once: show lock icon so bubble isn't empty */}
+          {msg.view_once && isMine && msg.file_id && (
+            <View style={[bs.viewOnceSender, { backgroundColor: 'rgba(255,255,255,0.12)' }]}>
+              <Ionicons name="lock-closed" size={18} color="rgba(255,255,255,0.8)" />
+              <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginLeft: 6 }}>
+                {msg.view_max === 2 ? 'View ×2 sent' : 'View once sent'}
+              </Text>
+            </View>
+          )}
+          {/* View-once not yet opened for receiver */}
+          {isViewOnce && (
+            <TouchableOpacity style={[bs.viewOnceBubble, { backgroundColor: isMine ? 'rgba(255,255,255,0.15)' : C.accentSoft }]} onPress={handleViewOnce}>
+              <Ionicons name="eye" size={26} color={isMine ? '#fff' : C.accent} />
+              <Text style={[bs.viewOnceLabel, { color: isMine ? '#fff' : C.accent }]}>
+                {msg.view_max === 2 ? 'Tap to view (×2)' : 'Tap to view once'}
+              </Text>
+            </TouchableOpacity>
+          )}
+          {(msg.type === 'text' || msg.type === 'gif') && !msg.is_deleted && !isViewOnce && !isViewOnceExhausted && (() => {
+            const content = msg.content || '';
+            const isGifUrl = content.startsWith('http') && (content.includes('tenor.com') || content.includes('gstatic.com') || content.includes('media.tenor') || content.endsWith('.gif'));
+            const isGifType = msg.type === 'gif' || isGifUrl;
+            if (isGifType && content) {
+              return (
+                <View style={{ overflow: 'hidden', borderRadius: 12, marginVertical: 2 }}>
+                  <Image
+                    source={{ uri: content }}
+                    style={{ width: 200, height: 150, borderRadius: 8 }}
+                    contentFit="cover"
+                    onError={() => console.log('[GIF ERROR] failed to load:', content?.slice(0, 60))}
+                  />
+                </View>
+              );
+            }
+            if (!content) return null;
+            return <Text style={[bs.bubbleText, { color: isMine ? '#fff' : C.textPrimary }]}>{content}</Text>;
+          })()}
+
+          {msg.type === 'thinking_of_you' && !msg.is_deleted && (
+            <View style={{ padding: 12, alignItems: 'center', justifyContent: 'center', minWidth: 140 }}>
+              <Text style={{ fontSize: 44, marginBottom: 6 }}>❤️</Text>
+              <Text style={{ color: isMine ? '#fff' : '#E4387A', fontSize: 14, fontWeight: '700', textAlign: 'center' }}>
+                {msg.content || '💭 Thinking of you'}
+              </Text>
+            </View>
+          )}
+          {msg.is_deleted && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', opacity: 0.7 }}>
+              <Ionicons name="ban-outline" size={14} color={isMine ? 'rgba(255,255,255,0.7)' : C.textSec} style={{ marginRight: 4 }} />
+              <Text style={[bs.deletedText, { color: isMine ? 'rgba(255,255,255,0.7)' : C.textSec }]}>This message was deleted</Text>
+            </View>
+          )}
+
+          {msg.type === 'image' && msg.file_id && !msg.view_once && (
+            <TouchableOpacity onPress={() => onImagePress?.(msg)}>
+              <Image
+                source={{ uri: mediaUrl(msg.file_id) }}
+                style={bs.imageThumb}
+                contentFit="cover"
+                cachePolicy="none"
+              />
+            </TouchableOpacity>
+          )}
+          {msg.type === 'video' && !msg.view_once && (
+            <TouchableOpacity style={bs.mediaRow} onPress={() => onImagePress?.(msg)}>
+              <View style={[bs.mediaIconBox, { backgroundColor: 'rgba(255,255,255,0.25)' }]}>
+                <Text style={bs.mediaIconText}>▶</Text>
+              </View>
+              <Text style={[bs.bubbleText, { color: isMine ? '#fff' : C.textPrimary }]} numberOfLines={1}>{msg.file_name || 'Video'}</Text>
+            </TouchableOpacity>
+          )}
+          {msg.type === 'audio' && msg.file_id && (
+            <VoiceBubble msg={msg} myId={myId} token={token} C={C} />
+          )}
+          {msg.type === 'file' && (
+            <View style={bs.mediaRow}>
+              <View style={[bs.mediaIconBox, { backgroundColor: 'rgba(255,255,255,0.25)' }]}>
+                <Text style={bs.mediaIconText}>↓</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[bs.bubbleText, { color: isMine ? '#fff' : C.textPrimary }]} numberOfLines={1}>{msg.file_name || 'File'}</Text>
+                {msg.file_size ? <Text style={[bs.fileSizeText, { color: isMine ? 'rgba(255,255,255,0.5)' : C.textSec }]}>{formatBytes(msg.file_size)}</Text> : null}
+              </View>
+            </View>
+          )}
+          <View style={bs.bubbleMeta}>
+            {msg.is_starred && <Ionicons name="star" size={10} color={isMine ? 'rgba(255,255,255,0.8)' : '#F18F01'} style={{ marginRight: 4 }} />}
+            <Text style={[bs.timeText, { color: isMine ? C.timeSent : C.time }]}>{formatTime(msg.created_at)}</Text>
+            {isMine && (
+              <View style={{ marginLeft: 4 }}>
+                <Ionicons name={msg.is_read ? "checkmark-done" : "checkmark"} size={14} color={msg.is_read ? "#34B7F1" : "rgba(255,255,255,0.6)"} />
+              </View>
+            )}
+          </View>
+        </TouchableOpacity>
+        {/* WhatsApp-style reaction pill — overlapping bottom corner */}
+        {
+          reactions.length > 0 && (
+            <View style={{
+              position: 'absolute',
+              bottom: -12,
+              left: isMine ? undefined : 8,
+              right: isMine ? 8 : undefined,
+              backgroundColor: 'white',
+              borderRadius: 12,
+              paddingHorizontal: 6,
+              paddingVertical: 2,
+              flexDirection: 'row',
+              alignItems: 'center',
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: 1 },
+              shadowOpacity: 0.15,
+              shadowRadius: 2,
+              elevation: 3,
+              borderWidth: 0.5,
+              borderColor: '#E0E0E0',
+            }}>
+              {reactions.map((r, i) => <Text key={i} style={{ fontSize: 14 }}>{r.emoji}</Text>)}
+              {reactions.length > 1 && (
+                <Text style={{ fontSize: 11, color: '#666', marginLeft: 2 }}>{reactions.length}</Text>
+              )}
+            </View>
+          )
+        }
+      </View >
+    </View >
+  );
+
+  return onSwipeToReply ? (
+    <Swipeable
+      renderLeftActions={renderReplyAction}
+      renderRightActions={renderReplyAction}
+      onSwipeableOpen={(direction, swipeable) => {
+        onSwipeToReply(msg);
+        swipeable.close();
+      }}
+      overshootRight={false}
+      overshootLeft={false}
+      friction={1.5}
+    >
+      {bubbleContent}
+    </Swipeable>
+  ) : bubbleContent;
+}, (prev, next) => {
+  const m1 = prev.msg; const m2 = next.msg;
+  if (m1.id !== m2.id) return false;
+  if (m1.is_read !== m2.is_read) return false;
+  if (m1.is_deleted !== m2.is_deleted) return false;
+  if (m1.content !== m2.content) return false;
+  if (m1.file_id !== m2.file_id) return false;
+  if (m1.view_count !== m2.view_count) return false;
+  if ((m1.reactions?.length || 0) !== (m2.reactions?.length || 0)) return false;
+  return prev.C === next.C && prev.myId === next.myId;
+});
 
 const bs = StyleSheet.create({
   bubbleWrap: { marginBottom: 4 },
@@ -186,8 +381,9 @@ function VoiceBubble({ msg, myId, token, C }) {
   const load = async () => {
     if (soundRef.current) return;
     await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
+    const audioUri = `${BASE_URL}/api/files/${msg.file_id}/view?token=${token}`;
     const { sound } = await Audio.Sound.createAsync(
-      { uri: `${BASE_URL}/api/files/${msg.file_id}/view`, headers: { Authorization: `Bearer ${token}` } },
+      { uri: audioUri },
       { shouldPlay: false }
     );
     sound.setOnPlaybackStatusUpdate(st => {
@@ -211,13 +407,13 @@ function VoiceBubble({ msg, myId, token, C }) {
   useEffect(() => () => { soundRef.current?.unloadAsync(); }, []);
 
   const progress = dur > 0 ? pos / dur : 0;
-  const fmt = ms => { const t = Math.floor(ms/1000); return `${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`; };
+  const fmt = ms => { const t = Math.floor(ms / 1000); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
   const textColor = isMine ? '#fff' : C.textPrimary;
 
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, minWidth: 180 }}>
       <TouchableOpacity onPress={togglePlay} style={[vb.btn, { backgroundColor: isMine ? 'rgba(255,255,255,0.25)' : C.accentSoft }]}>
-        <Text style={{ fontSize: 16 }}>{playing ? '⏸' : '▶'}</Text>
+        <Ionicons name={playing ? 'pause' : 'play'} size={16} color={isMine ? '#fff' : C.accent} />
       </TouchableOpacity>
       <View style={{ flex: 1, gap: 4 }}>
         <View style={[vb.track, { backgroundColor: isMine ? 'rgba(255,255,255,0.2)' : C.border }]}>
@@ -225,7 +421,7 @@ function VoiceBubble({ msg, myId, token, C }) {
         </View>
         <Text style={{ fontSize: 10, color: isMine ? 'rgba(255,255,255,0.6)' : C.textSec }}>{fmt(pos)} / {fmt(dur)}</Text>
       </View>
-      <Text style={{ fontSize: 16 }}>🎤</Text>
+      <Ionicons name="mic" size={15} color={isMine ? 'rgba(255,255,255,0.6)' : C.textSec} />
     </View>
   );
 }
@@ -236,18 +432,50 @@ const vb = StyleSheet.create({
 });
 
 // ── Reaction emojis (for long-press) ─────────────────────
-const REACT_EMOJIS = ['❤️', '😂', '😮', '😢', '😡', '👍', '🔥', '💜'];
+const REACT_EMOJIS = ['❤️', '😂', '😮', '😢', '😡', '👍'];
+const ti = StyleSheet.create({
+  time: { color: '#888', fontSize: 12, minWidth: 80, textAlign: 'right' },
+});
+
+function TypingIndicator({ C }) {
+  const d1 = useSharedValue(0);
+  const d2 = useSharedValue(0);
+  const d3 = useSharedValue(0);
+
+  useEffect(() => {
+    d1.value = withRepeat(withSequence(withTiming(-5, { duration: 300 }), withTiming(0, { duration: 300 }), withTiming(0, { duration: 400 })), -1, false);
+    d2.value = withDelay(150, withRepeat(withSequence(withTiming(-5, { duration: 300 }), withTiming(0, { duration: 300 }), withTiming(0, { duration: 400 })), -1, false));
+    d3.value = withDelay(300, withRepeat(withSequence(withTiming(-5, { duration: 300 }), withTiming(0, { duration: 300 }), withTiming(0, { duration: 400 })), -1, false));
+  }, []);
+
+  return (
+    <View style={[bs.bubbleWrap, bs.bubbleWrapLeft, { marginBottom: 8 }]}>
+      <View style={[bs.bubble, { backgroundColor: C.surface, borderColor: C.border, borderWidth: 1, flexDirection: 'row', gap: 4, paddingHorizontal: 16, paddingVertical: 14 }]}>
+        <Animated.View style={[{ width: 6, height: 6, borderRadius: 3, backgroundColor: C.accent }, { transform: [{ translateY: d1 }] }]} />
+        <Animated.View style={[{ width: 6, height: 6, borderRadius: 3, backgroundColor: C.accent }, { transform: [{ translateY: d2 }] }]} />
+        <Animated.View style={[{ width: 6, height: 6, borderRadius: 3, backgroundColor: C.accent }, { transform: [{ translateY: d3 }] }]} />
+      </View>
+    </View>
+  );
+}
 
 // ══════════════════════════════════════════════════════════
 export default function ChatScreen() {
   const { accessToken, logout } = useAuth();
   const { theme: C, themeKey, switchTheme, THEMES } = useTheme();
+  const insets = useSafeAreaInsets();
 
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [partnerTyping, setPartnerTyping] = useState(false);
+  const [showConfetti, setShowConfetti] = useState(false);
+
+  const triggerConfetti = useCallback(() => {
+    setShowConfetti(true);
+    setTimeout(() => setShowConfetti(false), 3500);
+  }, []);
   const [myId, setMyId] = useState(null);
   const [partnerProfile, setPartnerProfile] = useState(null);
   const [partnerId, setPartnerId] = useState(null);
@@ -255,8 +483,10 @@ export default function ChatScreen() {
   const [selectedMsg, setSelectedMsg] = useState(null);
   const [showActions, setShowActions] = useState(false);
   const [showAttach, setShowAttach] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   const [showStickers, setShowStickers] = useState(false);
+  const [reactingMode, setReactingMode] = useState(false);
   const [stickerPack, setStickerPack] = useState(Object.keys(EMOJI_CATEGORIES)[0]);
   const [stickerSearch, setStickerSearch] = useState('');
   const [showMenu, setShowMenu] = useState(false);
@@ -274,11 +504,29 @@ export default function ChatScreen() {
   const [pendingAudio, setPendingAudio] = useState(null); // {uri, duration}
   // View-once
   const [viewMode, setViewMode] = useState('normal'); // 'normal' | 'once' | 'twice'
+  // Search
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+
+  const doSearch = async (q) => {
+    setSearchQuery(q);
+    if (!q.trim()) { setSearchResults([]); return; }
+    setIsSearching(true);
+    try {
+      const res = await apiClient.get(`/api/messages/search?q=${encodeURIComponent(q)}`);
+      setSearchResults(res.data.messages || []);
+    } catch { } finally { setIsSearching(false); }
+  };
+
   const recordingTimer = useRef(null);
   const recordingRef = useRef(null);
 
 
   const flatListRef = useRef(null);
+  const textInputRef = useRef(null);
+  const stickerListRef = useRef(null);
   const socketRef = useRef(null);
   const typingTimer = useRef(null);
   const typingRef = useRef(false);
@@ -293,7 +541,7 @@ export default function ChatScreen() {
 
   useEffect(() => {
     if (!myId) return;
-    apiClient.get('/api/profile/partner').then(r => setPartnerProfile(r.data)).catch(() => {});
+    apiClient.get('/api/profile/partner').then(r => setPartnerProfile(r.data)).catch(() => { });
   }, [myId]);
 
   const fetchMessages = useCallback(async (before = null) => {
@@ -309,6 +557,17 @@ export default function ChatScreen() {
     finally { setLoading(false); setLoadingMore(false); }
   }, []);
 
+  useEffect(() => {
+    let appState = AppState.currentState;
+    const sub = AppState.addEventListener('change', nextState => {
+      if (appState.match(/inactive|background/) && nextState === 'active') {
+        if (partnerId) fetchMessages();
+      }
+      appState = nextState;
+    });
+    return () => sub.remove();
+  }, [partnerId, fetchMessages]);
+
   useEffect(() => { if (myId) fetchMessages(); }, [myId]);
 
   // Socket
@@ -319,13 +578,26 @@ export default function ChatScreen() {
     socket.on('connect', () => { if (partnerId) socket.emit('join_room', { partnerId }); });
     socket.on('new_message', (msg) => {
       setMessages(prev => prev.find(m => m.id === msg.id) ? prev : [...prev, msg]);
-      if (msg.sender_id !== myId) apiClient.put(`/api/messages/${msg.id}/read`).catch(() => {});
+      if (msg.sender_id !== myId) apiClient.put(`/api/messages/${msg.id}/read`).catch(() => { });
+      if (msg.type === 'text' && isBirthdayMessage(msg.content)) triggerConfetti();
     });
-    socket.on('partner_typing', () => setPartnerTyping(true));
-    socket.on('partner_stop_typing', () => setPartnerTyping(false));
-    socket.on('partner_offline', () => setPartnerTyping(false));
+    socket.on('partner_typing', () => {
+      setPartnerTyping(true);
+      clearTimeout(typingTimer.current);
+      typingTimer.current = setTimeout(() => setPartnerTyping(false), 3000);
+    });
+    socket.on('partner_stop_typing', () => { clearTimeout(typingTimer.current); setPartnerTyping(false); });
+    socket.on('partner_offline', () => { clearTimeout(typingTimer.current); setPartnerTyping(false); });
     socket.on('message_read_ack', ({ messageId }) => {
       setMessages(prev => prev.map(m => m.id === messageId ? { ...m, is_read: true } : m));
+    });
+    socket.on('message_starred', ({ messageId, is_starred }) => {
+      setMessages(prev => prev.map(m => m.id === messageId ? { ...m, is_starred } : m));
+    });
+    socket.on('message_edited', ({ messageId, content }) => {
+      setMessages(prev => prev.map(m =>
+        m.id === messageId ? { ...m, content } : m
+      ));
     });
     socket.on('reaction_update', ({ messageId, userId, emoji }) => {
       setMessages(prev => prev.map(m => {
@@ -369,11 +641,28 @@ export default function ChatScreen() {
     setText(''); setReplyTo(null);
     typingRef.current = false;
     socketRef.current?.emit('stop_typing');
+    // Optimistic append: show message immediately before server responds
+    const optimisticId = `opt_${Date.now()}`;
+    const optimisticMsg = {
+      id: optimisticId, content: trimmed, type: 'text',
+      sender_id: myId, created_at: new Date().toISOString(),
+      is_read: false, is_deleted: false, reactions: [],
+      reply_to: savedReplyTo ? { id: savedReplyTo.id, content: savedReplyTo.content, type: savedReplyTo.type } : null,
+    };
+    setMessages(prev => [...prev, optimisticMsg]);
     try {
       const res = await apiClient.post('/api/messages', { content: trimmed, reply_to_id: savedReplyTo?.id || null });
       const newMsg = res.data.message;
-      if (newMsg) setMessages(prev => prev.find(m => m.id === newMsg.id) ? prev : [...prev, newMsg]);
-    } catch { Alert.alert('Error', 'Failed to send'); }
+      // Replace optimistic with real message
+      if (newMsg) {
+        setMessages(prev => prev.map(m => m.id === optimisticId ? newMsg : m).filter((m, i, arr) => m.id !== newMsg.id || arr.indexOf(m) === i));
+        if (isBirthdayMessage(trimmed)) triggerConfetti();
+      }
+    } catch {
+      // Remove optimistic on failure
+      setMessages(prev => prev.filter(m => m.id !== optimisticId));
+      Alert.alert('Error', 'Failed to send');
+    }
     finally { setSending(false); }
   };
 
@@ -384,32 +673,91 @@ export default function ChatScreen() {
 
   const pickMedia = async (source) => {
     setShowAttach(false);
+
+    if (source === 'thinking_of_you') {
+      try {
+        const msg = {
+          id: 'opt_' + Date.now(),
+          sender_id: myId,
+          content: '💭 Thinking of you ❤️',
+          type: 'thinking_of_you',
+          created_at: new Date().toISOString(),
+          is_read: false,
+          is_deleted: false,
+        };
+        // Optimistic update
+        setMessages(prev => [msg, ...prev]);
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+
+        await apiClient.post('/api/messages', {
+          content: '💭 Thinking of you ❤️',
+          type: 'thinking_of_you',
+        });
+      } catch (err) {
+        console.log('Failed to send thinking of you');
+      }
+      return;
+    }
+
     try {
-      let file = null;
       if (source === 'camera') {
         const { status } = await ImagePicker.requestCameraPermissionsAsync();
         if (status !== 'granted') { Alert.alert('Permission needed'); return; }
-        const res = await ImagePicker.launchCameraAsync({ quality: 0.9 });
+        const res = await ImagePicker.launchCameraAsync({ quality: 0.85 });
         if (res.canceled || !res.assets?.length) return;
         const a = res.assets[0];
-        file = { uri: a.uri, name: `photo_${Date.now()}.jpg`, mimeType: 'image/jpeg', isImage: true };
+        if (a.fileSize > 50 * 1024 * 1024) { Alert.alert('File too large', 'Max size is 50MB'); return; }
+        setPendingMedia({ uri: a.uri, name: `photo_${Date.now()}.jpg`, mimeType: 'image/jpeg', isImage: true });
       } else if (source === 'gallery') {
         const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
         if (status !== 'granted') { Alert.alert('Permission needed'); return; }
         const res = await ImagePicker.launchImageLibraryAsync({
           mediaTypes: ImagePicker.MediaType ? [ImagePicker.MediaType.Images, ImagePicker.MediaType.Videos] : ImagePicker.MediaTypeOptions.All,
-          quality: 1,
+          quality: 0.85,
+          allowsMultipleSelection: true,
+          selectionLimit: 10,
         });
         if (res.canceled || !res.assets?.length) return;
-        const a = res.assets[0];
-        file = { uri: a.uri, name: a.fileName || `media_${Date.now()}`, mimeType: a.mimeType || 'image/jpeg', isImage: a.mimeType?.startsWith('image/') !== false };
+
+        console.log('PICKED FILE:', res.assets?.[0]?.uri, res.assets?.[0]?.mimeType);
+
+        const uri = res.assets[0].uri;
+        if (uri.includes('screenshot') || uri.includes('Screenshot')) {
+          Alert.alert('Cannot send screenshots');
+          return;
+        }
+
+        // Validate: filter out any non-media files
+        const validAssets = res.assets.filter(a => {
+          const mt = (a.mimeType || '').toLowerCase();
+          return mt.startsWith('image/') || mt.startsWith('video/');
+        });
+        if (!validAssets.length) { Alert.alert('Invalid file', 'Please select a valid image or video'); return; }
+        res.assets = validAssets;
+        if (res.assets.length === 1) {
+          const a = res.assets[0];
+          if (a.fileSize > 50 * 1024 * 1024) { Alert.alert('File too large', 'Max size is 50MB'); return; }
+          setPendingMedia({ uri: a.uri, name: a.fileName || `media_${Date.now()}`, mimeType: a.mimeType || 'image/jpeg', isImage: a.mimeType?.startsWith('image/') !== false });
+        } else {
+          // Send multiple images sequentially
+          for (const a of res.assets) {
+            const file = { uri: a.uri, name: a.fileName || `media_${Date.now()}`, mimeType: a.mimeType || 'image/jpeg' };
+            try {
+              const formData = new FormData();
+              formData.append('file', { uri: file.uri, name: file.name, type: file.mimeType });
+              const r = await apiClient.post('/api/messages/media', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+              const newMsg = r.data.message;
+              if (newMsg) setMessages(prev => prev.find(m => m.id === newMsg.id) ? prev : [...prev, newMsg]);
+            } catch { /* skip failed */ }
+          }
+        }
       } else {
         const res = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true });
         if (res.canceled || !res.assets?.length) return;
         const a = res.assets[0];
-        file = { uri: a.uri, name: a.name, mimeType: a.mimeType || 'application/octet-stream', isImage: false };
+        if (a.size > 50 * 1024 * 1024) { Alert.alert('File too large', 'Max size is 50MB'); return; }
+        setPendingMedia({ uri: a.uri, name: a.name, mimeType: a.mimeType || 'application/octet-stream', isImage: false });
       }
-      if (file) setPendingMedia(file);
     } catch { Alert.alert('Error', 'Could not pick file'); }
   };
 
@@ -420,6 +768,7 @@ export default function ChatScreen() {
     const isViewOnce = viewMode === 'once' || viewMode === 'twice';
     const vMax = viewMode === 'twice' ? 2 : 1;
     setViewMode('normal');
+    setUploadProgress(1); // Start indicator
     try {
       const formData = new FormData();
       formData.append('file', { uri: file.uri, name: file.name, type: file.mimeType });
@@ -427,10 +776,16 @@ export default function ChatScreen() {
         formData.append('view_once', 'true');
         formData.append('view_max', String(vMax));
       }
-      const res = await apiClient.post('/api/messages/media', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const res = await apiClient.post('/api/messages/media', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (e) => {
+          if (e.total > 0) setUploadProgress(Math.max(1, Math.round((e.loaded * 100) / e.total)));
+        }
+      });
       const newMsg = res.data.message;
       if (newMsg) setMessages(prev => prev.find(m => m.id === newMsg.id) ? prev : [...prev, newMsg]);
     } catch { Alert.alert('Error', 'Failed to send file'); }
+    finally { setUploadProgress(0); }
   };
 
   // Voice recording
@@ -476,6 +831,8 @@ export default function ChatScreen() {
     } catch { Alert.alert('Error', 'Failed to send voice message'); }
   };
 
+  const toggleRecording = () => recording ? stopRecording() : startRecording();
+
   // ── GIF search via Tenor v2 ───────────────────────────
   const searchGifs = async (q) => {
     if (!q?.trim()) return;
@@ -499,24 +856,36 @@ export default function ChatScreen() {
   const sendGif = async (gifUrl) => {
     setShowGif(false);
     try {
-      const name = `gif_${Date.now()}.gif`;
-      const dest = FileSystem.cacheDirectory + name;
-      const dl = await FileSystem.downloadAsync(gifUrl, dest);
-      const formData = new FormData();
-      formData.append('file', { uri: dl.uri, name, type: 'image/gif' });
-      const res = await apiClient.post('/api/messages/media', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const res = await apiClient.post('/api/messages', { content: gifUrl, type: 'gif' });
       const newMsg = res.data.message;
       if (newMsg) setMessages(prev => prev.find(m => m.id === newMsg.id) ? prev : [...prev, newMsg]);
-    } catch (e) { Alert.alert('Error', 'Failed to send GIF'); }
+    } catch (e) {
+      console.log('GIF ERROR:', e?.response?.data || e.message);
+      Alert.alert('Error', `Failed to send GIF: ${e?.response?.data?.error || e.message}`);
+    }
   };
 
-  // ── Actions ──────────────────────────────────────────
-  const handleLongPress = (msg) => { setSelectedMsg(msg); setShowActions(true); };
+  // ── Scroll to bottom ───────────────────────────────────
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
+
+  const handleScroll = (e) => {
+    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    const distFromBottom = contentSize.height - contentOffset.y - layoutMeasurement.height;
+    setShowScrollBtn(distFromBottom > 200);
+  };
+
+  // ── Socket events ──────────────────────────────────────────
+  const handleLongPress = (msg) => {
+    if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setSelectedMsg(msg);
+    setShowActions(true);
+  };
 
   const doReaction = async (emoji) => {
     setShowActions(false);
     if (!selectedMsg) return;
-    // optimistic update
+    // Optimistic update — intentionally NO scrollToEnd here
+    // so user stays at their current scroll position
     setMessages(prev => prev.map(m => {
       if (m.id !== selectedMsg.id) return m;
       const reactions = (m.reactions || []).filter(r => r.user_id !== myId);
@@ -527,6 +896,52 @@ export default function ChatScreen() {
     catch { Alert.alert('Error', 'Reaction failed'); }
   };
   const doReply = () => { setReplyTo(selectedMsg); setShowActions(false); };
+
+  const doStar = async () => {
+    setShowActions(false);
+    if (!selectedMsg) return;
+    const isStarred = selectedMsg.is_starred;
+    setMessages(prev => prev.map(m => m.id === selectedMsg.id ? { ...m, is_starred: !isStarred } : m));
+    try {
+      if (isStarred) await apiClient.put(`/api/messages/${selectedMsg.id}/unstar`);
+      else await apiClient.put(`/api/messages/${selectedMsg.id}/star`);
+    } catch {
+      setMessages(prev => prev.map(m => m.id === selectedMsg.id ? { ...m, is_starred: isStarred } : m));
+    }
+  };
+
+  // ── Edit ───────────────────────────────────────────────
+  const [editingMsg, setEditingMsg] = useState(null);
+  const [editText, setEditText] = useState('');
+
+  const doEdit = () => {
+    if (!selectedMsg || selectedMsg.type !== 'text' || selectedMsg.sender_id !== myId) return;
+    if (selectedMsg.is_read) { Alert.alert('Can\'t edit', 'Message already seen by partner'); setShowActions(false); return; }
+    setEditText(selectedMsg.content || '');
+    setEditingMsg(selectedMsg);
+    setShowActions(false);
+  };
+
+  const submitEdit = async () => {
+    if (!editingMsg || !editText.trim()) { setEditingMsg(null); return; }
+    try {
+      await apiClient.put(`/api/messages/${editingMsg.id}/edit`, { content: editText.trim() });
+      setMessages(prev => prev.map(m =>
+        m.id === editingMsg.id ? { ...m, content: editText.trim() } : m
+      ));
+    } catch (e) {
+      const msg = e.response?.data?.error || 'Edit failed';
+      Alert.alert('Error', msg);
+    } finally { setEditingMsg(null); setEditText(''); }
+  };
+
+  const doCopy = async () => {
+    if (selectedMsg?.content) {
+      await Clipboard.setStringAsync(selectedMsg.content);
+    }
+    setShowActions(false);
+  };
+
   const doDelete = async () => {
     setShowActions(false);
     if (selectedMsg?.sender_id !== myId) { Alert.alert('', 'You can only delete your own messages'); return; }
@@ -542,7 +957,7 @@ export default function ChatScreen() {
 
   const handleLogout = async () => {
     setShowMenu(false);
-    try { await apiClient.post('/api/auth/logout'); } catch {}
+    try { await apiClient.post('/api/auth/logout'); } catch { }
     await logout(); router.replace('/login');
   };
 
@@ -551,10 +966,24 @@ export default function ChatScreen() {
     ? searchEmojis(stickerSearch)
     : (EMOJI_CATEGORIES[stickerPack] || []);
 
-  // ── List data ─────────────────────────────────────────
+  // ── List data: deduplicate keeping real over optimistic ─
+  const seenIds = new Set();
+  const dedupedMessages = [];
+  // First pass: collect all real (non-optimistic) ids
+  const realIds = new Set(messages.filter(m => !String(m.id).startsWith('opt_')).map(m => String(m.id)));
+  for (const msg of messages) {
+    const key = String(msg.id);
+    if (key.startsWith('opt_')) {
+      // Only keep optimistic if no real message exists yet
+      if (!realIds.has(key.replace('opt_', ''))) dedupedMessages.push(msg);
+    } else {
+      if (!seenIds.has(key)) { seenIds.add(key); dedupedMessages.push(msg); }
+    }
+  }
+
   const listData = [];
-  messages.forEach((msg, i) => {
-    if (i === 0 || !sameDay(messages[i - 1].created_at, msg.created_at)) {
+  dedupedMessages.forEach((msg, i) => {
+    if (i === 0 || !sameDay(dedupedMessages[i - 1].created_at, msg.created_at)) {
       listData.push({ itemType: 'date', id: `date_${msg.id || i}`, label: formatDateLabel(msg.created_at) });
     }
     listData.push({ itemType: 'msg', ...msg });
@@ -562,10 +991,14 @@ export default function ChatScreen() {
   if (partnerTyping) listData.push({ itemType: 'typing', id: 'typing' });
 
   const partnerName = partnerProfile?.display_name || 'Partner';
-  const partnerAvatarUrl = partnerProfile?.avatar_url ? `${BASE_URL}${partnerProfile.avatar_url}` : null;
+  // Avatar endpoint has no auth but needs cache-bust; use timestamp to prevent expo-image caching a blank
+  const partnerAvatarUrl = partnerProfile?.avatar_url
+    ? `${BASE_URL}${partnerProfile.avatar_url}?v=${partnerProfile.id?.slice(-6) || '1'}`
+    : null;
 
   return (
-    <KeyboardAvoidingView style={[s.root, { backgroundColor: C.bg }]} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardAvoidingView style={[s.root, { backgroundColor: C.bg }]} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}>
+      <ConfettiOverlay active={showConfetti} />
 
       {/* ── Header ── */}
       <View style={[s.header, { backgroundColor: C.header, borderBottomColor: C.border }]}>
@@ -582,10 +1015,60 @@ export default function ChatScreen() {
             <Text style={[s.headerStatus, { color: C.textSec }]}>{partnerTyping ? 'typing...' : 'end-to-end encrypted'}</Text>
           </View>
         </TouchableOpacity>
-        <TouchableOpacity onPress={() => setShowMenu(true)} style={s.menuBtn}>
+        <TouchableOpacity onPress={() => { setShowSearch(!showSearch); setSearchQuery(''); setSearchResults([]); setShowMenu(false); }} style={[s.menuBtn, { marginRight: 2 }]}>
+          <Ionicons name="search" size={22} color={C.textSec} />
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => { setShowAttach(false); setShowStickers(false); setShowSearch(false); setShowMenu(true); }} style={s.menuBtn}>
           <Text style={[s.menuBtnText, { color: C.textSec }]}>⋮</Text>
         </TouchableOpacity>
       </View>
+
+      {/* ── Search Bar ── */}
+      {showSearch && (
+        <View style={{ padding: 10, backgroundColor: C.surface, borderBottomWidth: 1, borderBottomColor: C.border }}>
+          <TextInput
+            style={{ backgroundColor: C.bg, color: C.textPrimary, padding: 10, borderRadius: 10 }}
+            placeholder="Search messages..."
+            placeholderTextColor={C.textSec}
+            value={searchQuery}
+            onChangeText={doSearch}
+            autoFocus
+          />
+        </View>
+      )}
+
+      {/* ── Search Results Overlay ── */}
+      {showSearch && searchQuery.trim() !== '' && (
+        <View style={{ position: 'absolute', top: 120, left: 0, right: 0, bottom: 0, backgroundColor: C.bg, zIndex: 10 }}>
+          {isSearching ? (
+            <ActivityIndicator color={C.accent} style={{ marginTop: 20 }} />
+          ) : (
+            <FlatList
+              data={searchResults}
+              keyExtractor={item => item.id}
+              contentContainerStyle={{ padding: 12 }}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={{ backgroundColor: C.surface, padding: 12, borderRadius: 10, marginBottom: 8, borderWidth: 1, borderColor: C.border }}
+                  onPress={() => {
+                    setShowSearch(false);
+                    const idx = listData.findIndex(m => m.id === item.id);
+                    if (idx !== -1) {
+                      flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 });
+                    }
+                  }}
+                >
+                  <Text style={{ fontSize: 12, color: C.textSec, marginBottom: 4 }}>
+                    {formatDateLabel(item.created_at)} • {formatTime(item.created_at)}
+                  </Text>
+                  <Text style={{ color: C.textPrimary }}>{item.content}</Text>
+                </TouchableOpacity>
+              )}
+              ListEmptyComponent={<Text style={{ textAlign: 'center', color: C.textSec, marginTop: 20 }}>No messages found.</Text>}
+            />
+          )}
+        </View>
+      )}
 
       {/* ── Messages ── */}
       {loading ? (
@@ -594,24 +1077,26 @@ export default function ChatScreen() {
         <FlatList
           ref={flatListRef}
           data={listData}
-          keyExtractor={(item) => item.id || item.created_at || Math.random().toString()}
+          keyExtractor={(item, index) => item.id ? `msg-${item.id}` : `temp-${index}`}
           renderItem={({ item }) => {
             if (item.itemType === 'date') return (
               <View style={s.dateSeparator}>
                 <Text style={[s.dateSeparatorText, { color: C.textSec, backgroundColor: C.datePill || C.accentSoft }]}>{item.label}</Text>
               </View>
             );
-            if (item.itemType === 'typing') return (
-              <View style={[s.typingBubble, { backgroundColor: C.surface, borderColor: C.border }]}>
-                <View style={[s.typingDot, { backgroundColor: C.accent }]} />
-                <View style={[s.typingDot, { backgroundColor: C.accent, opacity: 0.6 }]} />
-                <View style={[s.typingDot, { backgroundColor: C.accent, opacity: 0.3 }]} />
-              </View>
-            );
+            if (item.itemType === 'typing') return <TypingIndicator C={C} />;
             return (
               <MessageBubble
                 msg={item} myId={myId} token={accessToken} C={C}
                 onLongPress={handleLongPress}
+                onSwipeToReply={(m) => {
+                  if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setReplyTo(m);
+                }}
+                onQuotePress={(id) => {
+                  const idx = listData.findIndex(x => x.id === id);
+                  if (idx !== -1) flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 });
+                }}
                 onImagePress={(m) => router.push({
                   pathname: '/view',
                   params: { id: m.file_id, name: m.file_name || 'File', mime: m.mime_type || 'image/jpeg' },
@@ -629,16 +1114,39 @@ export default function ChatScreen() {
             </View>
           }
           contentContainerStyle={listData.length === 0 ? { flex: 1 } : { padding: 12, paddingBottom: 8 }}
-          onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
+          onLayout={() => flatListRef.current?.scrollToEnd({ animated: false })}
+          onContentSizeChange={() => { if (!showScrollBtn) flatListRef.current?.scrollToEnd({ animated: false }); }}
+          onScroll={handleScroll}
+          scrollEventThrottle={100}
         />
+      )}
+
+      {/* Scroll to bottom FAB */}
+      {showScrollBtn && (
+        <TouchableOpacity
+          style={[s.scrollFab, { backgroundColor: C.accent, bottom: replyTo ? 145 : 90 }]}
+          onPress={() => { flatListRef.current?.scrollToEnd({ animated: true }); setShowScrollBtn(false); }}
+        >
+          <Ionicons name="chevron-down" size={20} color="#fff" />
+        </TouchableOpacity>
       )}
 
       {/* Recording bar */}
       {recording && (
         <View style={[s.recordingBar, { backgroundColor: C.surface, borderTopColor: C.border }]}>
-          <Text style={{ fontSize: 20 }}>⏺</Text>
-          <Text style={[s.recordingText, { color: C.accent }]}>
-            Recording... {Math.floor(recordingSecs/60)}:{String(recordingSecs%60).padStart(2,'0')}
+          <TouchableOpacity
+            style={{ paddingHorizontal: 12 }}
+            onPress={async () => {
+              clearInterval(recordingTimer.current);
+              try { await recordingRef.current?.stopAndUnloadAsync(); } catch { }
+              setRecording(null); recordingRef.current = null; setRecordingSecs(0);
+            }}
+          >
+            <Ionicons name="trash-outline" size={24} color="#E4387A" />
+          </TouchableOpacity>
+          <Ionicons name="radio-button-on" size={18} color={C.accent} style={{ marginLeft: 'auto' }} />
+          <Text style={[s.recordingText, { color: C.accent, flex: 1, marginLeft: 8 }]}>
+            Recording... {Math.floor(recordingSecs / 60)}:{String(recordingSecs % 60).padStart(2, '0')}
           </Text>
           <TouchableOpacity onPress={stopRecording} style={[s.stopRecBtn, { backgroundColor: C.accent }]}>
             <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Stop</Text>
@@ -649,69 +1157,122 @@ export default function ChatScreen() {
       {/* Pending audio preview */}
       {pendingAudio && !recording && (
         <View style={[s.pendingAudioBar, { backgroundColor: C.surface, borderTopColor: C.border }]}>
-          <Text style={{ fontSize: 20 }}>🎤</Text>
+          <Ionicons name="mic" size={20} color={C.accent} />
           <Text style={[s.pendingAudioText, { color: C.textPrimary }]}>
-            Voice ({Math.floor(pendingAudio.duration/60)}:{String(pendingAudio.duration%60).padStart(2,'0')})
+            Voice ({Math.floor(pendingAudio.duration / 60)}:{String(pendingAudio.duration % 60).padStart(2, '0')})
           </Text>
           <TouchableOpacity onPress={() => setPendingAudio(null)} style={{ padding: 6 }}>
-            <Text style={{ color: C.textSec, fontSize: 18 }}>✕</Text>
+            <Ionicons name="close" size={18} color={C.textSec} />
           </TouchableOpacity>
           <TouchableOpacity onPress={sendAudio} style={[s.sendAudioBtn, { backgroundColor: C.accent }]}>
-            <Text style={{ color: '#fff', fontWeight: '700' }}>↑ Send</Text>
+            <Ionicons name="send" size={14} color="#fff" />
+            <Text style={{ color: '#fff', fontWeight: '700', marginLeft: 4 }}>Send</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Edit message bar */}
+      {editingMsg && (
+        <View style={[s.replyBar, { backgroundColor: C.surface, borderTopColor: C.border }]}>
+          <View style={[s.replyBarAccent, { backgroundColor: C.accent }]} />
+          <TextInput
+            style={[{ flex: 1, color: C.textPrimary, fontSize: 15, paddingVertical: 8 }]}
+            value={editText}
+            onChangeText={setEditText}
+            autoFocus
+            multiline
+            onSubmitEditing={submitEdit}
+          />
+          <TouchableOpacity onPress={submitEdit} style={[s.saveBtn, { backgroundColor: C.accent, marginLeft: 8 }]}>
+            <Ionicons name="checkmark" size={18} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setEditingMsg(null)} style={{ padding: 8 }}>
+            <Ionicons name="close" size={18} color={C.textSec} />
           </TouchableOpacity>
         </View>
       )}
 
       {/* Reply bar */}
-      {replyTo && (
-        <View style={[s.replyBar, { backgroundColor: C.surface, borderTopColor: C.border }]}>
-          <View style={[s.replyBarAccent, { backgroundColor: C.accent }]} />
-          <View style={{ flex: 1 }}>
-            <Text style={[s.replyBarLabel, { color: C.accent }]}>Replying</Text>
-            <Text style={[s.replyBarText, { color: C.textSec }]} numberOfLines={1}>{replyTo.content || 'Media'}</Text>
+      {replyTo && (() => {
+        const rp = getReplyPreview(replyTo);
+        return (
+          <View style={{
+            flexDirection: 'row', alignItems: 'center',
+            paddingHorizontal: 12, paddingVertical: 8,
+            borderTopWidth: 1, borderTopColor: C.border,
+            backgroundColor: C.accentSoft || '#F0EEFF',
+            borderLeftWidth: 3, borderLeftColor: C.accent,
+            marginHorizontal: 0,
+          }}>
+            <Ionicons name="return-down-back" size={16} color={C.accent} style={{ marginRight: 8 }} />
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 12, color: C.accent, fontWeight: '600' }}>Replying</Text>
+              <Text style={{ fontSize: 13, color: C.textSec, marginTop: 1 }} numberOfLines={1}>{rp.label}</Text>
+            </View>
+            {rp.isMedia && rp.uri && (
+              <Image source={{ uri: rp.uri }} style={{ width: 40, height: 40, borderRadius: 6, marginLeft: 8 }} contentFit="cover" />
+            )}
+            <TouchableOpacity onPress={() => setReplyTo(null)} style={{ padding: 8, marginLeft: 4 }}>
+              <Ionicons name="close" size={18} color={C.textSec} />
+            </TouchableOpacity>
           </View>
-          <TouchableOpacity onPress={() => setReplyTo(null)} style={{ padding: 6 }}>
-            <Text style={[s.replyBarClose, { color: C.textSec }]}>✕</Text>
-          </TouchableOpacity>
+        );
+      })()}
+
+      {/* Upload Progress */}
+      {uploadProgress > 0 && uploadProgress < 100 && (
+        <View style={{ backgroundColor: C.accent, paddingVertical: 4, alignItems: 'center' }}>
+          <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>Uploading Media... {uploadProgress}%</Text>
+        </View>
+      )}
+      {uploadProgress === 100 && (
+        <View style={{ backgroundColor: C.accent, paddingVertical: 4, alignItems: 'center' }}>
+          <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>Finishing Upload...</Text>
         </View>
       )}
 
       {/* ── Input bar ── */}
-      <View style={[s.inputBar, { backgroundColor: C.surface, borderTopColor: C.border }]}>
-        <TouchableOpacity style={[s.iconBtn, { backgroundColor: C.accentSoft }]} onPress={() => setShowAttach(true)}>
-          <Text style={[s.iconBtnText, { color: C.textSec }]}>+</Text>
+      <View style={[s.inputBar, { backgroundColor: C.surface, borderTopColor: C.border, paddingBottom: Math.max(insets.bottom, 8) }]}>
+        <TouchableOpacity style={[s.iconBtn, { backgroundColor: C.accentSoft, width: 32, height: 32, borderRadius: 16 }]} onPress={() => { setShowStickers(false); setShowAttach(true); }}>
+          <Ionicons name="add" size={22} color={C.accent} />
         </TouchableOpacity>
-        <TouchableOpacity style={[s.iconBtn, { backgroundColor: C.accentSoft }]} onPress={() => { setShowStickers(true); setStickerSearch(''); }}>
-          <Text style={[s.iconBtnText, { fontSize: 18 }]}>🙂</Text>
+        <TouchableOpacity style={[s.iconBtn, { backgroundColor: C.accentSoft, marginLeft: 4, width: 32, height: 32, borderRadius: 16 }]} onPress={() => { setShowAttach(false); setReactingMode(false); setStickerSearch(''); setShowStickers(true); }}>
+          <Ionicons name="happy-outline" size={20} color={C.accent} />
         </TouchableOpacity>
-        <TouchableOpacity style={[s.iconBtn, { backgroundColor: C.accentSoft }]} onPress={() => { setShowGif(true); setGifQuery(''); setGifResults([]); }}>
-          <Text style={[s.iconBtnText, { fontSize: 11, fontWeight: '800', color: C.accent }]}>GIF</Text>
+        <TouchableOpacity style={[s.iconBtn, { backgroundColor: C.accentSoft, marginLeft: 4, width: 34, height: 32, borderRadius: 10 }]} onPress={() => setShowGif(true)}>
+          <Text style={[s.iconBtnText, { fontSize: 10, fontWeight: '900', color: C.accent }]}>GIF</Text>
         </TouchableOpacity>
         <TextInput
-          style={[s.input, { backgroundColor: C.bg, color: C.textPrimary, borderColor: C.border }]}
+          ref={textInputRef}
+          style={{
+            flex: 1,
+            borderRadius: 22,
+            paddingHorizontal: 14,
+            paddingVertical: 9,
+            fontSize: 15,
+            maxHeight: 120,
+            borderWidth: 1,
+            borderColor: '#DDDDDD',
+            color: '#111111',
+            backgroundColor: '#F5F5F5',
+          }}
+          placeholderTextColor="#888888"
+          placeholder="Message..."
           value={text}
           onChangeText={handleTextChange}
-          placeholder="Message..."
-          placeholderTextColor={C.textSec + '88'}
           multiline
           maxLength={2000}
         />
         <TouchableOpacity
           style={[s.sendBtn, { backgroundColor: text.trim() ? C.accent : C.accentSoft }]}
-          onPress={() => sendText()}
-          disabled={!text.trim() || sending}
+          onPress={() => text.trim() ? sendText() : (recording ? stopRecording() : startRecording())}
+          disabled={sending}
         >
-          {sending ? <ActivityIndicator color="#fff" size="small" /> : <Text style={[s.sendIcon, { color: text.trim() ? '#fff' : C.textSec }]}>↑</Text>}
+          {sending
+            ? <ActivityIndicator color="#fff" size="small" />
+            : <Ionicons name={text.trim() ? 'send' : (recording ? 'stop-circle' : 'mic')} size={18} color={text.trim() ? '#fff' : C.accent} />
+          }
         </TouchableOpacity>
-        {!text.trim() && !sending && (
-          <TouchableOpacity
-            style={[s.iconBtn, { backgroundColor: recording ? C.accent : C.accentSoft, marginLeft: 4 }]}
-            onPressIn={startRecording}
-            onPressOut={stopRecording}
-          >
-            <Text style={{ fontSize: 16 }}>{recording ? '⏹' : '🎤'}</Text>
-          </TouchableOpacity>
-        )}
       </View>
 
       {/* ════════════════════ MODALS ════════════════════ */}
@@ -722,6 +1283,10 @@ export default function ChatScreen() {
           <View style={[s.menuBox, { backgroundColor: C.surface, borderColor: C.border }]}>
             <TouchableOpacity style={s.menuItem} onPress={() => { setShowMenu(false); router.push('/profile'); }}>
               <Text style={[s.menuItemText, { color: C.textPrimary }]}>View Profile</Text>
+            </TouchableOpacity>
+            <View style={[s.menuDivider, { backgroundColor: C.border }]} />
+            <TouchableOpacity style={s.menuItem} onPress={() => { setShowMenu(false); router.push('/dates'); }}>
+              <Text style={[s.menuItemText, { color: C.textPrimary }]}>Special Dates</Text>
             </TouchableOpacity>
             <View style={[s.menuDivider, { backgroundColor: C.border }]} />
             <TouchableOpacity style={s.menuItem} onPress={() => { setShowMenu(false); setShowThemes(true); }}>
@@ -767,15 +1332,16 @@ export default function ChatScreen() {
             <Text style={[s.sheetTitle, { color: C.textSec }]}>SEND</Text>
             <View style={s.attachGrid}>
               {[
-                { label: 'Camera', key: 'camera', icon: '📷', bg: C.accentSoft },
-                { label: 'Gallery', key: 'gallery', icon: '🖼', bg: C.accentSoft },
-                { label: 'File', key: 'file', icon: '📄', bg: C.accentSoft },
+                { label: 'Camera', key: 'camera', ionicon: 'camera', bg: C.accentSoft },
+                { label: 'Gallery', key: 'gallery', ionicon: 'images', bg: C.accentSoft },
+                { label: 'File', key: 'file', ionicon: 'document-text', bg: C.accentSoft },
+                { label: 'Thinking of You', key: 'thinking_of_you', ionicon: 'heart', bg: '#FFE4E8' },
               ].map(item => (
                 <TouchableOpacity key={item.key} style={s.attachCard} onPress={() => pickMedia(item.key)}>
-                  <View style={[s.attachIconBox, { backgroundColor: item.bg, borderColor: C.border }]}>
-                    <Text style={{ fontSize: 26 }}>{item.icon}</Text>
+                  <View style={[s.attachIconBox, { backgroundColor: item.bg, borderColor: C.border, borderWidth: item.key === 'thinking_of_you' ? 0 : 1 }]}>
+                    <Ionicons name={item.ionicon} size={28} color={item.key === 'thinking_of_you' ? '#FF477E' : C.accent} />
                   </View>
-                  <Text style={[s.attachLabel, { color: C.textSec }]}>{item.label}</Text>
+                  <Text style={[s.attachLabel, { color: item.key === 'thinking_of_you' ? '#FF477E' : C.textSec }]}>{item.label}</Text>
                 </TouchableOpacity>
               ))}
             </View>
@@ -810,13 +1376,18 @@ export default function ChatScreen() {
             {/* View-once selector — only for images/videos */}
             {(pendingMedia?.isImage || pendingMedia?.mimeType?.startsWith('video/')) && (
               <View style={[s.viewModeRow, { backgroundColor: C.surface }]}>
-                {[['normal','📤 Normal'],['once','👁 Once'],['twice','👁👁 Twice']].map(([mode, label]) => (
+                {[
+                  { mode: 'normal', label: 'Normal', ionicon: 'send-outline' },
+                  { mode: 'once', label: 'Once', ionicon: 'eye-outline' },
+                  { mode: 'twice', label: 'Twice ×2', ionicon: 'eye' },
+                ].map(({ mode, label, ionicon }) => (
                   <TouchableOpacity
                     key={mode}
                     style={[s.viewModeBtn, { backgroundColor: viewMode === mode ? C.accent : C.bg, borderColor: C.border }]}
                     onPress={() => setViewMode(mode)}
                   >
-                    <Text style={{ fontSize: 12, color: viewMode === mode ? '#fff' : C.textSec, fontWeight: '600' }}>{label}</Text>
+                    <Ionicons name={ionicon} size={16} color={viewMode === mode ? '#fff' : C.textSec} />
+                    <Text style={{ fontSize: 11, color: viewMode === mode ? '#fff' : C.textSec, fontWeight: '600', marginLeft: 4 }}>{label}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -879,57 +1450,76 @@ export default function ChatScreen() {
 
       {/* ── Sticker / Emoji Panel ── */}
       <Modal visible={showStickers} transparent animationType="slide" onRequestClose={() => setShowStickers(false)}>
-        <Pressable style={s.sheetOverlay} onPress={() => setShowStickers(false)}>
-          <View style={[s.sheet, { backgroundColor: C.surface, paddingBottom: 12, maxHeight: '70%' }]}>
+        <View style={s.sheetOverlay}>
+          <TouchableOpacity activeOpacity={1} style={StyleSheet.absoluteFillObject} onPress={() => setShowStickers(false)} />
+          <View style={[s.sheet, { backgroundColor: C.surface, paddingBottom: 12 }]}>
             <View style={[s.sheetHandle, { backgroundColor: C.border }]} />
 
             {/* Search bar */}
             <View style={[s.stickerSearchBar, { backgroundColor: C.bg, borderColor: C.border }]}>
-              <Text style={{ fontSize: 14, marginRight: 6 }}>🔍</Text>
+              <Ionicons name="search" size={16} color={C.textSec} style={{ marginRight: 6 }} />
               <TextInput
                 style={[s.stickerSearchInput, { color: C.textPrimary }]}
                 value={stickerSearch}
                 onChangeText={setStickerSearch}
-                placeholder="Search stickers & emoji..."
+                placeholder="Search emoji..."
                 placeholderTextColor={C.textSec + '88'}
               />
               {stickerSearch.length > 0 && (
                 <TouchableOpacity onPress={() => setStickerSearch('')}>
-                  <Text style={{ color: C.textSec, fontSize: 16, paddingLeft: 6 }}>✕</Text>
+                  <Ionicons name="close-circle" size={18} color={C.textSec} />
                 </TouchableOpacity>
               )}
             </View>
 
-            {/* Category tabs — hidden during search */}
+            {/* Category tabs */}
             {!stickerSearch && (
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.packTabs} contentContainerStyle={{ paddingHorizontal: 4, gap: 6 }}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 0, paddingBottom: 0 }} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingHorizontal: 6, gap: 10 }}>
                 {Object.keys(EMOJI_CATEGORIES).map(pack => (
                   <TouchableOpacity
                     key={pack}
                     onPress={() => setStickerPack(pack)}
-                    style={[s.packTab, { backgroundColor: stickerPack === pack ? C.accent : C.bg, borderColor: C.border }]}
+                    style={[s.packTab, { borderBottomColor: stickerPack === pack ? C.accent : 'transparent' }]}
                   >
-                    <Text style={[s.packTabText, { color: stickerPack === pack ? '#fff' : C.textSec }]}>{pack}</Text>
+                    <Text style={[s.packTabText, { color: stickerPack === pack ? C.accent : C.textSec }]}>{pack}</Text>
                   </TouchableOpacity>
                 ))}
               </ScrollView>
             )}
 
-            {/* Emoji grid */}
-            <ScrollView>
-              <View style={s.stickerGrid}>
-                {stickerEmojis.map((emoji, i) => (
-                  <TouchableOpacity key={i} onPress={() => sendSticker(emoji)} style={s.stickerBtn}>
+            {/* Emoji grid — fixed height, no flex:1 */}
+            <View style={{ height: 280, overflow: 'hidden' }}>
+              <FlatList
+                data={stickerSearch.trim() ? stickerEmojis : (EMOJI_CATEGORIES[stickerPack] || [])}
+                numColumns={7}
+                style={{ flex: 0 }}
+                contentContainerStyle={{ paddingTop: 4, paddingBottom: 8 }}
+                keyExtractor={(item, index) => `e-${index}`}
+                keyboardShouldPersistTaps="handled"
+                renderItem={({ item: emoji }) => (
+                  <TouchableOpacity
+                    style={s.stickerBtn}
+                    onPress={() => {
+                      if (reactingMode) {
+                        setShowStickers(false);
+                        setReactingMode(false);
+                        doReaction(emoji);
+                      } else {
+                        setText(prev => prev + emoji);
+                        setShowStickers(false);
+                      }
+                    }}
+                  >
                     <Text style={s.stickerEmoji}>{emoji}</Text>
                   </TouchableOpacity>
-                ))}
-                {stickerEmojis.length === 0 && stickerSearch.length > 0 && (
-                  <Text style={[s.emptySub, { color: C.textSec, padding: 20 }]}>No results for "{stickerSearch}"</Text>
                 )}
-              </View>
-            </ScrollView>
+                ListEmptyComponent={stickerSearch.length > 0 ? (
+                  <Text style={[s.emptySub, { color: C.textSec, padding: 20 }]}>No results for "{stickerSearch}"</Text>
+                ) : null}
+              />
+            </View>
           </View>
-        </Pressable>
+        </View>
       </Modal>
 
       {/* ── WhatsApp-style Long Press Overlay ── */}
@@ -940,8 +1530,10 @@ export default function ChatScreen() {
             <View style={[
               s.waMsgPreview,
               selectedMsg.sender_id === myId ? s.waMsgRight : s.waMsgLeft,
-              { backgroundColor: selectedMsg.sender_id === myId ? C.bubbleSent : C.bubbleReceived,
-                borderColor: C.border },
+              {
+                backgroundColor: selectedMsg.sender_id === myId ? C.bubbleSent : C.bubbleReceived,
+                borderColor: C.border
+              },
             ]}>
               {selectedMsg.reply_to && (
                 <View style={[s.waQuoteBar, { borderLeftColor: selectedMsg.sender_id === myId ? 'rgba(255,255,255,0.6)' : C.accent, backgroundColor: 'rgba(0,0,0,0.08)' }]}>
@@ -953,8 +1545,8 @@ export default function ChatScreen() {
               <Text style={{ color: selectedMsg.sender_id === myId ? '#fff' : C.textPrimary, fontSize: 14, lineHeight: 20 }} numberOfLines={3}>
                 {selectedMsg.content ||
                   (selectedMsg.type === 'image' ? '📷 Photo' :
-                   selectedMsg.type === 'video' ? '🎬 Video' :
-                   selectedMsg.type === 'audio' ? '🎵 Audio' : '📄 File')}
+                    selectedMsg.type === 'video' ? '🎬 Video' :
+                      selectedMsg.type === 'audio' ? '🎵 Audio' : '📄 File')}
               </Text>
             </View>
           )}
@@ -966,18 +1558,42 @@ export default function ChatScreen() {
                 <Text style={s.waEmojiText}>{e}</Text>
               </TouchableOpacity>
             ))}
+            <TouchableOpacity
+              style={[s.waEmojiBtn, { backgroundColor: C.bg, borderRadius: 16, height: 32, width: 32, justifyContent: 'center', alignItems: 'center' }]}
+              onPress={() => { setShowActions(false); setReactingMode(true); setShowStickers(true); }}
+            >
+              <Ionicons name="add" size={20} color={C.textSec} />
+            </TouchableOpacity>
           </View>
 
           {/* Action rows */}
           <View style={[s.waActionsBox, { backgroundColor: C.surface }]}>
             <TouchableOpacity style={s.waActionRow} onPress={doReply}>
-              <Text style={s.waActionIcon}>↩</Text>
+              <Ionicons name="return-down-back" size={18} color={C.textPrimary} style={{ marginRight: 12 }} />
               <Text style={[s.waActionText, { color: C.textPrimary }]}>Reply</Text>
             </TouchableOpacity>
+
+            <TouchableOpacity style={[s.waActionRow, s.waActionRowTop, { borderTopColor: C.border }]} onPress={doStar}>
+              <Ionicons name={selectedMsg?.is_starred ? "star" : "star-outline"} size={18} color="#F18F01" style={{ marginRight: 12 }} />
+              <Text style={[s.waActionText, { color: C.textPrimary }]}>{selectedMsg?.is_starred ? 'Unstar' : 'Star'}</Text>
+            </TouchableOpacity>
+
+            {selectedMsg?.type === 'text' && (
+              <TouchableOpacity style={[s.waActionRow, s.waActionRowTop, { borderTopColor: C.border }]} onPress={doCopy}>
+                <Ionicons name="copy-outline" size={18} color={C.textPrimary} style={{ marginRight: 12 }} />
+                <Text style={[s.waActionText, { color: C.textPrimary }]}>Copy text</Text>
+              </TouchableOpacity>
+            )}
+            {selectedMsg?.sender_id === myId && selectedMsg?.type === 'text' && !selectedMsg?.is_read && (
+              <TouchableOpacity style={[s.waActionRow, s.waActionRowTop, { borderTopColor: C.border }]} onPress={doEdit}>
+                <Ionicons name="create-outline" size={18} color={C.accent} style={{ marginRight: 12 }} />
+                <Text style={[s.waActionText, { color: C.accent }]}>Edit</Text>
+              </TouchableOpacity>
+            )}
             {selectedMsg?.sender_id === myId && (
               <TouchableOpacity style={[s.waActionRow, s.waActionRowTop, { borderTopColor: C.border }]} onPress={doDelete}>
-                <Text style={s.waActionIcon}>🗑</Text>
-                <Text style={[s.waActionText, { color: C.accent }]}>Delete</Text>
+                <Ionicons name="trash-outline" size={18} color="#ff4444" style={{ marginRight: 12 }} />
+                <Text style={[s.waActionText, { color: '#ff4444' }]}>Delete</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -1100,15 +1716,15 @@ const s = StyleSheet.create({
   stickerSearchBar: {
     flexDirection: 'row', alignItems: 'center',
     borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8,
-    marginBottom: 10, borderWidth: 1,
+    marginBottom: 10, borderWidth: 1, marginHorizontal: 12
   },
   stickerSearchInput: { flex: 1, fontSize: 14, paddingVertical: 2 },
-  packTabs: { marginBottom: 10 },
-  packTab: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 20, borderWidth: 1 },
-  packTabText: { fontSize: 12, fontWeight: '600' },
-  stickerGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-start', gap: 2 },
-  stickerBtn: { padding: 6 },
-  stickerEmoji: { fontSize: 30 },
+  packTabs: { marginBottom: 0 },
+  packTab: { paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 2 },
+  packTabText: { fontSize: 13, fontWeight: '600' },
+  stickerGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-start', paddingHorizontal: 6, paddingTop: 8, paddingBottom: 20 },
+  stickerBtn: { padding: 8, width: SCREEN_W / 8, alignItems: 'center' },
+  stickerEmoji: { fontSize: 32 },
 
   themeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, justifyContent: 'center', paddingVertical: 8 },
   themeCard: {
@@ -1158,8 +1774,9 @@ const s = StyleSheet.create({
   // View-once
   viewOnceBubble: { borderRadius: 14, paddingHorizontal: 20, paddingVertical: 14, alignItems: 'center', gap: 6 },
   viewOnceLabel: { fontSize: 13, fontWeight: '600' },
-  viewOnceOpened: { paddingHorizontal: 10, paddingVertical: 6 },
+  viewOnceOpened: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 6 },
   viewOnceText: { fontSize: 12, fontStyle: 'italic' },
+  viewOnceSender: { flexDirection: 'row', alignItems: 'center', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginTop: 4 },
 
   // Recording / pending audio
   recordingBar: {
@@ -1168,6 +1785,14 @@ const s = StyleSheet.create({
   },
   recordingText: { flex: 1, fontSize: 14, fontWeight: '600' },
   stopRecBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16 },
+  scrollFab: {
+    position: 'absolute', bottom: 90, right: 16,
+    width: 40, height: 40, borderRadius: 20,
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 8,
+    zIndex: 999,
+  },
+  saveBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 12 },
   pendingAudioBar: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: 1,

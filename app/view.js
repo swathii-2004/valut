@@ -8,7 +8,8 @@ import { Image } from 'expo-image';
 import { WebView } from 'react-native-webview';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as ScreenCapture from 'expo-screen-capture';
 import { useAuth } from '../context/AuthContext';
 
 const { width, height } = Dimensions.get('window');
@@ -56,7 +57,7 @@ function AudioPlayer({ uri, name }) {
     try {
       if (status.isPlaying) await s.pauseAsync();
       else await s.playAsync();
-    } catch {}
+    } catch { }
   };
 
   const fmt = (ms) => {
@@ -98,6 +99,13 @@ const ap = StyleSheet.create({
 export default function ViewScreen() {
   const { id, name, mime } = useLocalSearchParams();
   const { accessToken } = useAuth();
+
+  useEffect(() => {
+    ScreenCapture.preventScreenCaptureAsync();
+    return () => {
+      ScreenCapture.allowScreenCaptureAsync();
+    };
+  }, []);
   const [localUri, setLocalUri] = useState(null);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState(null);
@@ -119,7 +127,7 @@ export default function ViewScreen() {
         const info = await FileSystem.getInfoAsync(dest);
         if (info.exists) { setLocalUri(dest); return; }
         const dl = FileSystem.createDownloadResumable(
-          fileUrl, dest, { headers: { Authorization: `Bearer ${accessToken}` } }
+          `${fileUrl}?token=${accessToken}`, dest
         );
         const result = await dl.downloadAsync();
         if (result?.uri) setLocalUri(result.uri);
@@ -144,11 +152,13 @@ export default function ViewScreen() {
     if (!accessToken) return <ActivityIndicator color="#E4387A" />;
 
     if (isImage) {
+      const imageUrl = `${fileUrl}?token=${accessToken}`;
       return (
         <Image
-          source={{ uri: fileUrl, headers: { Authorization: `Bearer ${accessToken}` } }}
+          source={{ uri: imageUrl }}
           style={s.image}
           contentFit="contain"
+          cachePolicy="none"
         />
       );
     }
