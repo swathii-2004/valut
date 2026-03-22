@@ -9,7 +9,10 @@ const fs = require('fs');
 const pool = require('../db/pool');
 const authMiddleware = require('../middleware/auth');
 
-const AVATAR_DIR = process.env.AVATAR_PATH || path.join(process.env.STORAGE_PATH || './storage', 'avatars');
+const AVATAR_DIR = path.resolve(
+    process.env.AVATAR_PATH ||
+    path.join(process.env.STORAGE_PATH || './storage', 'avatars')
+);
 
 const upload = multer({
     storage: multer.diskStorage({
@@ -79,8 +82,9 @@ router.get('/avatar/:userId', async (req, res) => {
         if (!result.rows.length || !result.rows[0].avatar_filename) {
             return res.status(404).json({ error: 'No avatar' });
         }
-        const filePath = path.join(AVATAR_DIR, result.rows[0].avatar_filename);
+        const filePath = path.resolve(path.join(AVATAR_DIR, result.rows[0].avatar_filename));
         if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+        res.set('Cache-Control', 'no-store');
         res.sendFile(filePath);
     } catch (err) {
         return res.status(500).json({ error: 'Failed to serve avatar' });
@@ -119,6 +123,23 @@ router.put('/display-name', authMiddleware, async (req, res) => {
     } catch (err) {
         console.error('[PROFILE] PUT /display-name error:', err.message);
         return res.status(500).json({ error: 'Failed to update name' });
+    }
+});
+
+// POST /api/profile/push-token — save Expo push token
+router.post('/push-token', authMiddleware, async (req, res) => {
+    try {
+        const { token } = req.body;
+        if (!token) return res.status(400).json({ error: 'Token required' });
+        await pool.query(
+            `UPDATE users SET push_token = $1 WHERE id = $2`,
+            [token, req.user.sub]
+        );
+        console.log(`[PROFILE] Push token saved for ${req.user.email}`);
+        return res.json({ success: true });
+    } catch (err) {
+        console.error('[PROFILE] POST /push-token error:', err.message);
+        return res.status(500).json({ error: 'Failed to save push token' });
     }
 });
 

@@ -10,6 +10,7 @@ const authRoutes = require('./routes/auth');
 const fileRoutes = require('./routes/files');
 const messageRoutes = require('./routes/messages');
 const profileRoutes = require('./routes/profile');
+const datesRoutes = require('./routes/dates');
 const socketState = require('./socket');
 
 const app = express();
@@ -28,14 +29,14 @@ app.use(express.json());
 // ── Global rate limiter ──
 app.use(rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 200,
+    max: 1000,
     message: { error: 'Too many requests' },
 }));
 
 // ── Auth rate limiter ──
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 10,
+    max: 50,
     message: { error: 'Too many auth attempts' },
 });
 
@@ -44,6 +45,7 @@ app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/files', fileRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/profile', profileRoutes);
+app.use('/api/dates', datesRoutes);
 
 // ── Health check ──
 app.get('/health', (req, res) => res.json({ status: 'ok' }));

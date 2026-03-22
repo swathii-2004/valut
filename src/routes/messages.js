@@ -10,6 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const { encrypt, decrypt } = require('../utils/crypto');
 const authMiddleware = require('../middleware/auth');
+const { sendPushToUser, getMessagePreview } = require('../utils/pushNotifications');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
 
@@ -30,7 +31,7 @@ async function getPartnerId(myId) {
 // Helper — decrypt a message row into safe shape
 function decryptMessage(row, keyVersion) {
     let content = null;
-    if (row.type === 'text' && row.content && row.content_iv && row.content_tag) {
+    if ((row.type === 'text' || row.type === 'gif' || row.type === 'thinking_of_you') && row.content && row.content_iv && row.content_tag) {
         try {
             content = decrypt(
                 Buffer.from(row.content, 'hex'),
@@ -54,7 +55,7 @@ function decryptMessage(row, keyVersion) {
     }
     // Decrypt reply_to text if present
     let replyToContent = null;
-    if (row.rt_content && row.rt_content_iv && row.rt_content_tag) {
+    if ((row.rt_type === 'text' || row.rt_type === 'gif') && row.rt_content && row.rt_content_iv && row.rt_content_tag) {
         try {
             replyToContent = decrypt(
                 Buffer.from(row.rt_content, 'hex'),
@@ -90,6 +91,7 @@ function decryptMessage(row, keyVersion) {
         read_at: row.read_at,
         created_at: row.created_at,
         reactions: row.reactions || [],
+        is_starred: row.is_starred || false,
     };
 }
 
@@ -153,8 +155,9 @@ router.get('/', authMiddleware, async (req, res) => {
 // ══════════════════════════════════════════════
 router.post('/', authMiddleware, async (req, res) => {
     try {
-        const { content, reply_to_id } = req.body;
+        const { content, reply_to_id, type = 'text' } = req.body;
         if (!content?.trim()) return res.status(400).json({ error: 'Content required' });
+        const isGif = type === 'gif';
 
         const myId = req.user.sub;
         const partnerId = await getPartnerId(myId);
@@ -165,9 +168,9 @@ router.post('/', authMiddleware, async (req, res) => {
 
         const result = await pool.query(
             `INSERT INTO messages
-               (sender_id, receiver_id, type, content, content_iv, content_tag, key_version, reply_to_id) VALUES ($1, $2, 'text', $3, $4, $5, $6, $7)
+               (sender_id, receiver_id, type, content, content_iv, content_tag, key_version, reply_to_id) VALUES ($1, $2, $8, $3, $4, $5, $6, $7)
              RETURNING *`,
-            [myId, partnerId, enc.ciphertext.toString('hex'), enc.iv, enc.authTag, keyVersion, reply_to_id || null]
+            [myId, partnerId, enc.ciphertext.toString('hex'), enc.iv, enc.authTag, keyVersion, reply_to_id || null, type]
         );
 
         const msg = decryptMessage(result.rows[0], keyVersion);
@@ -182,7 +185,7 @@ router.post('/', authMiddleware, async (req, res) => {
                 if (rtRes.rows.length > 0) {
                     const rt = rtRes.rows[0];
                     let replyToContent = null;
-                    if (rt.type === 'text' && rt.content && rt.content_iv && rt.content_tag) {
+                    if ((rt.type === 'text' || rt.type === 'gif' || rt.type === 'thinking_of_you') && rt.content && rt.content_iv && rt.content_tag) {
                         try {
                             replyToContent = decrypt(
                                 Buffer.from(rt.content, 'hex'),
@@ -202,6 +205,18 @@ router.post('/', authMiddleware, async (req, res) => {
         socketState.getIo()?.to(roomId).emit('new_message', msg);
 
         console.log(`[MESSAGES] 📨 Text sent: ${req.user.email} → partner`);
+
+        // Push notification to partner
+        const senderRes = await pool.query(`SELECT display_name FROM users WHERE id = $1`, [myId]);
+        const senderName = senderRes.rows[0]?.display_name || req.user.email.split('@')[0];
+
+        const previewTitle = type === 'thinking_of_you' ? '💭 Thinking of you' : senderName;
+        const previewBody = type === 'thinking_of_you'
+            ? `${senderName} is thinking of you ❤️`
+            : getMessagePreview(type, content.trim());
+
+        sendPushToUser(partnerId, previewTitle, previewBody, { type: 'message', messageId: msg.id });
+
         return res.status(201).json({ message: msg });
     } catch (err) {
         console.error('[MESSAGES] POST error:', err.message);
@@ -247,7 +262,7 @@ router.post('/media', authMiddleware, upload.single('file'), async (req, res) =>
                 encrypted_name, name_iv, name_auth_tag, mime_type, file_size_bytes)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
             [myId, storedFilename, encFile.iv, encFile.authTag, keyVersion,
-             encName.ciphertext.toString('hex'), encName.iv, encName.authTag, mimetype, buffer.length]
+                encName.ciphertext.toString('hex'), encName.iv, encName.authTag, mimetype, buffer.length]
         );
         const fileId = fileResult.rows[0].id;
 
@@ -270,6 +285,13 @@ router.post('/media', authMiddleware, upload.single('file'), async (req, res) =>
         socketState.getIo()?.to(roomId).emit('new_message', msg);
 
         console.log(`[MESSAGES] 📎 Media sent: ${req.user.email} → partner (${type}${viewOnce ? ' view-once' : ''})`);
+
+        // Push notification to partner
+        const senderRes = await pool.query(`SELECT display_name FROM users WHERE id = $1`, [myId]);
+        const senderName = senderRes.rows[0]?.display_name || req.user.email.split('@')[0];
+        const preview = getMessagePreview(type, msg.file_name);
+        sendPushToUser(partnerId, senderName, preview, { type: 'message', messageId: msg.id });
+
         return res.status(201).json({ message: msg });
     } catch (err) {
         console.error('[MESSAGES] POST /media error:', err.message);
@@ -278,7 +300,51 @@ router.post('/media', authMiddleware, upload.single('file'), async (req, res) =>
 });
 
 // ══════════════════════════════════════════════
+// PUT /api/messages/:id/edit — edit unseen text
+// Only allowed if: sender = me, type = text/sticker, is_read = FALSE
+// ══════════════════════════════════════════════
+router.put('/:id/edit', authMiddleware, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { content } = req.body;
+        const myId = req.user.sub;
 
+        if (!content?.trim()) return res.status(400).json({ error: 'Content required' });
+
+        // Check message exists, belongs to me, is text type, and not yet read
+        const check = await pool.query(
+            `SELECT id, type, is_read, key_version FROM messages
+             WHERE id = $1 AND sender_id = $2 AND is_deleted = FALSE`,
+            [id, myId]
+        );
+        if (!check.rows.length) return res.status(404).json({ error: 'Message not found or not yours' });
+        const msg = check.rows[0];
+        if (msg.type !== 'text') return res.status(403).json({ error: 'Only text messages can be edited' });
+        if (msg.is_read) return res.status(403).json({ error: 'Cannot edit a message that has been read' });
+
+        const keyVersion = await getActiveKeyVersion();
+        const enc = encrypt(Buffer.from(content.trim(), 'utf8'), keyVersion);
+
+        await pool.query(
+            `UPDATE messages SET content = $1, content_iv = $2, content_tag = $3, key_version = $4
+             WHERE id = $5`,
+            [enc.ciphertext.toString('hex'), enc.iv, enc.authTag, keyVersion, id]
+        );
+
+        const socketState = require('../socket');
+        const partnerId = await getPartnerId(myId);
+        const roomId = [myId, partnerId].sort().join('_');
+        socketState.getIo()?.to(roomId).emit('message_edited', { messageId: id, content: content.trim() });
+
+        console.log(`[MESSAGES] ✏️ Edited: ${id}`);
+        return res.json({ ok: true, content: content.trim() });
+    } catch (err) {
+        console.error('[MESSAGES] PUT /edit error:', err.message);
+        return res.status(500).json({ error: 'Failed to edit message' });
+    }
+});
+
+// ══════════════════════════════════════════════
 // DELETE /api/messages/:id — soft delete
 // ══════════════════════════════════════════════
 router.delete('/:id', authMiddleware, async (req, res) => {
@@ -449,5 +515,95 @@ router.get('/search', authMiddleware, async (req, res) => {
     }
 });
 
+
+// ══════════════════════════════════════════════
+// GET /api/messages/starred — fetch starred msg
+// ══════════════════════════════════════════════
+router.get('/starred', authMiddleware, async (req, res) => {
+    try {
+        const myId = req.user.sub;
+        const partnerId = await getPartnerId(myId);
+
+        const result = await pool.query(
+            `SELECT m.*,
+                f.mime_type as file_mime_type,
+                f.file_size_bytes,
+                f.encrypted_name, f.name_iv, f.name_auth_tag,
+                f.key_version as file_key_version
+             FROM messages m
+             LEFT JOIN files f ON f.id = m.file_id
+             WHERE ((m.sender_id = $1 AND m.receiver_id = $2)
+                 OR (m.sender_id = $2 AND m.receiver_id = $1))
+               AND m.is_deleted = FALSE
+               AND m.is_starred = TRUE
+             ORDER BY m.created_at DESC`,
+            [myId, partnerId]
+        );
+
+        const keyVersion = await getActiveKeyVersion();
+        const messages = result.rows.map(r => decryptMessage(r, keyVersion));
+
+        return res.json({ messages });
+    } catch (err) {
+        console.error('[MESSAGES] GET /starred error:', err.message);
+        return res.status(500).json({ error: 'Failed to fetch starred messages' });
+    }
+});
+
+// ══════════════════════════════════════════════
+// PUT /api/messages/:id/star
+// ══════════════════════════════════════════════
+router.put('/:id/star', authMiddleware, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const myId = req.user.sub;
+        const partnerId = await getPartnerId(myId);
+
+        await pool.query(
+            `UPDATE messages SET is_starred = TRUE
+             WHERE id = $1 AND 
+             (sender_id = $2 OR receiver_id = $2)`,
+            [id, myId]
+        );
+
+        const socketState = require('../socket');
+        const roomId = [myId, partnerId].sort().join('_');
+        socketState.getIo()?.to(roomId).emit('message_starred', { messageId: id, is_starred: true });
+
+        return res.json({ ok: true });
+    } catch (err) {
+        console.error('[MESSAGES] PUT /star error:', err.message);
+        return res.status(500).json({ error: 'Failed to star message' });
+    }
+});
+
+// ══════════════════════════════════════════════
+// PUT /api/messages/:id/unstar
+// ══════════════════════════════════════════════
+router.put('/:id/unstar', authMiddleware, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const myId = req.user.sub;
+        const partnerId = await getPartnerId(myId);
+
+        await pool.query(
+            `UPDATE messages SET is_starred = FALSE
+             WHERE id = $1 AND 
+             (sender_id = $2 OR receiver_id = $2)`,
+            [id, myId]
+        );
+
+        const socketState = require('../socket');
+        const roomId = [myId, partnerId].sort().join('_');
+        socketState.getIo()?.to(roomId).emit('message_starred', { messageId: id, is_starred: false });
+
+        return res.json({ ok: true });
+    } catch (err) {
+        console.error('[MESSAGES] PUT /unstar error:', err.message);
+        return res.status(500).json({ error: 'Failed to unstar message' });
+    }
+});
+
 module.exports = router;
+
 
