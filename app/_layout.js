@@ -28,12 +28,23 @@ async function registerForPushNotificationsAsync() {
 
   if (Platform.OS === 'android') {
     await Notifications.setNotificationChannelAsync('default', {
+      name: 'Default',
+      importance: Notifications.AndroidImportance.HIGH,
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: '#E4387A',
+      sound: 'default',
+      enableVibrate: true,
+    });
+    // High-priority 'messages' channel that matches backend channelId
+    await Notifications.setNotificationChannelAsync('messages', {
       name: 'Messages',
       importance: Notifications.AndroidImportance.MAX,
       vibrationPattern: [0, 250, 250, 250],
       lightColor: '#E4387A',
       sound: 'default',
       enableVibrate: true,
+      bypassDnd: false,
+      lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
     });
   }
 

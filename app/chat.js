@@ -81,6 +81,67 @@ const ConfettiParticle = ({ delay, x }) => {
   );
 };
 
+// ── Animated 3-dot Typing Bubble (iMessage style) ────────────────
+const TypingBubble = React.memo(({ C }) => {
+  const dot1 = useSharedValue(0);
+  const dot2 = useSharedValue(0);
+  const dot3 = useSharedValue(0);
+  const fadeAnim = useSharedValue(0);
+
+  useEffect(() => {
+    const DURATION = 400;
+    const DELAY = 160;
+    const bounce = (sv, delay) => {
+      sv.value = withDelay(
+        delay,
+        withRepeat(
+          withSequence(
+            withTiming(-7, { duration: DURATION }),
+            withTiming(0, { duration: DURATION })
+          ),
+          -1,
+          false
+        )
+      );
+    };
+    bounce(dot1, 0);
+    bounce(dot2, DELAY);
+    bounce(dot3, DELAY * 2);
+    fadeAnim.value = withTiming(1, { duration: 200 });
+    return () => {
+      dot1.value = 0; dot2.value = 0; dot3.value = 0; fadeAnim.value = 0;
+    };
+  }, []);
+
+  const s1 = { transform: [{ translateY: dot1 }] };
+  const s2 = { transform: [{ translateY: dot2 }] };
+  const s3 = { transform: [{ translateY: dot3 }] };
+  const fadeStyle = { opacity: fadeAnim };
+
+  return (
+    <Animated.View style={[{ alignSelf: 'flex-start', marginLeft: 8, marginBottom: 8, marginTop: 2 }, fadeStyle]}>
+      <View style={[{
+        backgroundColor: C.surface || '#F0F0F0',
+        borderRadius: 20,
+        borderBottomLeftRadius: 6,
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 5,
+        shadowColor: '#000',
+        shadowOpacity: 0.06,
+        shadowRadius: 4,
+        elevation: 2,
+      }]}>
+        <Animated.View style={[{ width: 8, height: 8, borderRadius: 4, backgroundColor: C.textSec || '#999' }, s1]} />
+        <Animated.View style={[{ width: 8, height: 8, borderRadius: 4, backgroundColor: C.textSec || '#999' }, s2]} />
+        <Animated.View style={[{ width: 8, height: 8, borderRadius: 4, backgroundColor: C.textSec || '#999' }, s3]} />
+      </View>
+    </Animated.View>
+  );
+});
+
 const ConfettiOverlay = ({ active }) => {
   const particles = useRef(Array.from({ length: 30 }).map((_, i) => ({
     id: i, delay: Math.random() * 2000, x: Math.random() * SCREEN_W
@@ -272,7 +333,11 @@ const MessageBubble = React.memo(({ msg, myId, token, C, onLongPress, onImagePre
             <Text style={[bs.timeText, { color: isMine ? C.timeSent : C.time }]}>{formatTime(msg.created_at)}</Text>
             {isMine && (
               <View style={{ marginLeft: 4 }}>
-                <Ionicons name={msg.is_read ? "checkmark-done" : "checkmark"} size={14} color={msg.is_read ? "#34B7F1" : "rgba(255,255,255,0.6)"} />
+                <Ionicons
+                  name={msg.is_read ? 'checkmark-done' : msg.is_delivered ? 'checkmark-done' : 'checkmark'}
+                  size={14}
+                  color={msg.is_read ? '#34B7F1' : 'rgba(255,255,255,0.6)'}
+                />
               </View>
             )}
           </View>
@@ -329,6 +394,7 @@ const MessageBubble = React.memo(({ msg, myId, token, C, onLongPress, onImagePre
   const m1 = prev.msg; const m2 = next.msg;
   if (m1.id !== m2.id) return false;
   if (m1.is_read !== m2.is_read) return false;
+  if (m1.is_delivered !== m2.is_delivered) return false;
   if (m1.is_deleted !== m2.is_deleted) return false;
   if (m1.content !== m2.content) return false;
   if (m1.file_id !== m2.file_id) return false;
@@ -578,8 +644,15 @@ export default function ChatScreen() {
     socket.on('connect', () => { if (partnerId) socket.emit('join_room', { partnerId }); });
     socket.on('new_message', (msg) => {
       setMessages(prev => prev.find(m => m.id === msg.id) ? prev : [...prev, msg]);
-      if (msg.sender_id !== myId) apiClient.put(`/api/messages/${msg.id}/read`).catch(() => { });
+      if (msg.sender_id !== myId) {
+        apiClient.put(`/api/messages/${msg.id}/read`).catch(() => { });
+        // Tell sender their message was delivered
+        socket.emit('message_delivered', { messageId: msg.id });
+      }
       if (msg.type === 'text' && isBirthdayMessage(msg.content)) triggerConfetti();
+    });
+    socket.on('message_delivered_ack', ({ messageId }) => {
+      setMessages(prev => prev.map(m => m.id === messageId ? { ...m, is_delivered: true } : m));
     });
     socket.on('partner_typing', () => {
       setPartnerTyping(true);
@@ -1084,7 +1157,7 @@ export default function ChatScreen() {
                 <Text style={[s.dateSeparatorText, { color: C.textSec, backgroundColor: C.datePill || C.accentSoft }]}>{item.label}</Text>
               </View>
             );
-            if (item.itemType === 'typing') return <TypingIndicator C={C} />;
+            if (item.itemType === 'typing') return <TypingBubble C={C} key="typing" />;
             return (
               <MessageBubble
                 msg={item} myId={myId} token={accessToken} C={C}
