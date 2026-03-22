@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "615562406144",
+    "project_id": "couple-valut",
+    "storage_bucket": "couple-valut.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:615562406144:android:ec99ebb4bdfd8f6adaebe5",
+        "android_client_info": {
+          "package_name": "com.subbu1190.couplevaultapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDj3ToCX2A3tIGBZGHohpuEVtRs4xeOPtM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

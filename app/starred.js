@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, SafeAreaView, Text, StyleSheet, TouchableOpacity, FlatList, ActivityIndicator } from 'react-native';
-import { Ionicons }
-import { useSafeAreaInsets } from 'react-native-safe-area-context'; from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
@@ -117,7 +117,7 @@ const s = StyleSheet.create({
     header: {
         height: 56, flexDirection: 'row', alignItems: 'center',
         justifyContent: 'space-between', borderBottomWidth: 1, paddingHorizontal: 16,
-        
+
     },
     backBtn: { flexDirection: 'row', alignItems: 'center', width: 70 },
     backText: { fontSize: 16, fontWeight: '500', marginLeft: 2 },

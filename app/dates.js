@@ -3,8 +3,8 @@ import {
     View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
     Alert, TextInput, FlatList, Modal, KeyboardAvoidingView, Platform
 } from 'react-native';
-import { Ionicons }
-import { useSafeAreaInsets } from 'react-native-safe-area-context'; from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import apiClient from '../api/client';
 import { useTheme } from '../context/ThemeContext';
