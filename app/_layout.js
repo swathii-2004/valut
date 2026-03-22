@@ -17,18 +17,23 @@ Notifications.setNotificationHandler({
   }),
 });
 
+// Hardcoded projectId - most reliable approach for production APKs
+const EAS_PROJECT_ID = 'ba4ad1e5-bedc-4654-86e7-91277672c1b2';
+
 async function registerForPushNotificationsAsync() {
   if (!Device.isDevice) {
-    console.log('[PUSH] Must use a physical device — skipping on emulator/simulator');
+    console.log('[PUSH] Skipping — not a physical device');
     return null;
   }
 
   if (Platform.OS === 'android') {
     await Notifications.setNotificationChannelAsync('default', {
-      name: 'default',
+      name: 'Messages',
       importance: Notifications.AndroidImportance.MAX,
       vibrationPattern: [0, 250, 250, 250],
       lightColor: '#E4387A',
+      sound: 'default',
+      enableVibrate: true,
     });
   }
 
@@ -38,30 +43,29 @@ async function registerForPushNotificationsAsync() {
     const { status } = await Notifications.requestPermissionsAsync();
     finalStatus = status;
   }
+
   if (finalStatus !== 'granted') {
-    console.log('[PUSH] Permission denied');
+    console.log('[PUSH] ❌ Permission denied — user must enable notifications in Settings');
     return null;
   }
 
   try {
+    // Try Constants first, fall back to hardcoded ID
     const projectId =
       Constants?.expoConfig?.extra?.eas?.projectId ??
-      Constants?.easConfig?.projectId;
+      Constants?.easConfig?.projectId ??
+      EAS_PROJECT_ID;
 
-    if (!projectId) {
-      console.log('[PUSH] Project ID not found — run "eas init" to configure project.');
-      return null;
-    }
-
-    const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
-    console.log('[PUSH] Token obtained:', token);
+    console.log('[PUSH] Using projectId:', projectId);
+    const tokenData = await Notifications.getExpoPushTokenAsync({ projectId });
+    const token = tokenData.data;
+    console.log('[PUSH] ✅ Token obtained:', token);
     return token;
   } catch (e) {
-    console.log('[PUSH] Error getting push token:', e.message);
+    console.log('[PUSH] ❌ Error getting token:', e.message);
+    return null;
   }
-  return null;
 }
-
 
 function RootLayoutNav() {
   const { accessToken, loading } = useAuth();
@@ -73,24 +77,37 @@ function RootLayoutNav() {
     } else {
       router.replace('/chat');
 
-      // Register for push notifications once logged in
-      registerForPushNotificationsAsync().then(token => {
+      // Register push token with retries
+      const saveToken = async () => {
+        const token = await registerForPushNotificationsAsync();
         if (token) {
-          apiClient.post('/api/profile/push-token', { token })
-            .catch(err => console.log('Failed to save push token:', err.message));
+          try {
+            await apiClient.post('/api/profile/push-token', { token });
+            console.log('[PUSH] ✅ Token saved to server');
+          } catch (err) {
+            console.log('[PUSH] ❌ Failed to save token:', err.message);
+          }
         }
+      };
+      saveToken();
+
+      // Show notifications when app is in foreground
+      const foregroundSub = Notifications.addNotificationReceivedListener(notification => {
+        console.log('[PUSH] Foreground notification received:', notification.request.content.title);
       });
 
       // Handle notification taps
-      const responseListener = Notifications.addNotificationResponseReceivedListener(response => {
+      const responseSub = Notifications.addNotificationResponseReceivedListener(() => {
         router.navigate('/chat');
       });
 
       return () => {
-        Notifications.removeNotificationSubscription(responseListener);
+        Notifications.removeNotificationSubscription(foregroundSub);
+        Notifications.removeNotificationSubscription(responseSub);
       };
     }
   }, [accessToken, loading]);
+
 
   if (loading) {
     return (
