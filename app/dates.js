@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import {
     View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
-    Alert, TextInput, FlatList, SafeAreaView, Modal, KeyboardAvoidingView, Platform
+    Alert, TextInput, FlatList, Modal, KeyboardAvoidingView, Platform
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons }
+import { useSafeAreaInsets } from 'react-native-safe-area-context'; from '@expo/vector-icons';
 import { router } from 'expo-router';
 import apiClient from '../api/client';
 import { useTheme } from '../context/ThemeContext';
@@ -11,6 +12,7 @@ import { useAuth } from '../context/AuthContext';
 import { io } from 'socket.io-client';
 
 export default function DatesScreen() {
+    const insets = useSafeAreaInsets();
     const { theme: C } = useTheme();
     const { accessToken } = useAuth();
     const [dates, setDates] = useState([]);
@@ -162,7 +164,7 @@ export default function DatesScreen() {
     };
 
     return (
-        <SafeAreaView style={[s.root, { backgroundColor: C.bg }]}>
+        <View style={[s.root, { backgroundColor: C.bg, paddingTop: Math.max(insets.top, 20) }]}>
             {/* Header */}
             <View style={[s.header, { backgroundColor: C.surface, borderBottomColor: C.border }]}>
                 <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
@@ -239,7 +241,7 @@ export default function DatesScreen() {
                     </View>
                 </KeyboardAvoidingView>
             </Modal>
-        </SafeAreaView>
+        </View>
     );
 }
 

@@ -236,28 +236,28 @@ const MessageBubble = React.memo(({ msg, myId, token, C, onLongPress, onImagePre
           )}
 
           {msg.type === 'image' && msg.file_id && !msg.view_once && (
-            <TouchableOpacity onPress={() => onImagePress?.(msg)}>
+            <Pressable onPress={() => onImagePress?.(msg)} onLongPress={() => handleLongPress(msg)}>
               <Image
                 source={{ uri: mediaUrl(msg.file_id) }}
                 style={bs.imageThumb}
                 contentFit="cover"
                 cachePolicy="none"
               />
-            </TouchableOpacity>
+            </Pressable>
           )}
           {msg.type === 'video' && !msg.view_once && (
-            <TouchableOpacity style={bs.mediaRow} onPress={() => onImagePress?.(msg)}>
+            <Pressable style={bs.mediaRow} onPress={() => onImagePress?.(msg)} onLongPress={() => handleLongPress(msg)}>
               <View style={[bs.mediaIconBox, { backgroundColor: 'rgba(255,255,255,0.25)' }]}>
                 <Text style={bs.mediaIconText}>▶</Text>
               </View>
               <Text style={[bs.bubbleText, { color: isMine ? '#fff' : C.textPrimary }]} numberOfLines={1}>{msg.file_name || 'Video'}</Text>
-            </TouchableOpacity>
+            </Pressable>
           )}
           {msg.type === 'audio' && msg.file_id && (
             <VoiceBubble msg={msg} myId={myId} token={token} C={C} />
           )}
-          {msg.type === 'file' && (
-            <View style={bs.mediaRow}>
+          {msg.type === 'file' && !msg.view_once && (
+            <Pressable style={bs.mediaRow} onPress={() => FileSystem.downloadAsync(mediaUrl(msg.file_id), FileSystem.documentDirectory + msg.file_name)} onLongPress={() => handleLongPress(msg)}>
               <View style={[bs.mediaIconBox, { backgroundColor: 'rgba(255,255,255,0.25)' }]}>
                 <Text style={bs.mediaIconText}>↓</Text>
               </View>
@@ -265,7 +265,7 @@ const MessageBubble = React.memo(({ msg, myId, token, C, onLongPress, onImagePre
                 <Text style={[bs.bubbleText, { color: isMine ? '#fff' : C.textPrimary }]} numberOfLines={1}>{msg.file_name || 'File'}</Text>
                 {msg.file_size ? <Text style={[bs.fileSizeText, { color: isMine ? 'rgba(255,255,255,0.5)' : C.textSec }]}>{formatBytes(msg.file_size)}</Text> : null}
               </View>
-            </View>
+            </Pressable>
           )}
           <View style={bs.bubbleMeta}>
             {msg.is_starred && <Ionicons name="star" size={10} color={isMine ? 'rgba(255,255,255,0.8)' : '#F18F01'} style={{ marginRight: 4 }} />}
@@ -1354,7 +1354,7 @@ export default function ChatScreen() {
 
       {/* Preview modal */}
       <Modal visible={!!pendingMedia} transparent={false} animationType="slide">
-        <SafeAreaView style={[s.previewRoot, { backgroundColor: C.bg }]}>
+        <View style={[s.previewRoot, { backgroundColor: C.bg, paddingTop: Math.max(insets.top, 20) }]}>
           <View style={[s.previewHeader, { backgroundColor: C.surface, borderBottomColor: C.border }]}>
             <TouchableOpacity onPress={() => setPendingMedia(null)}>
               <Text style={[s.previewClose, { color: C.textSec }]}>✕</Text>
@@ -1393,12 +1393,12 @@ export default function ChatScreen() {
               </View>
             )}
           </View>
-        </SafeAreaView>
+        </View>
       </Modal>
 
       {/* GIF Picker */}
       <Modal visible={showGif} transparent={false} animationType="slide" onRequestClose={() => setShowGif(false)}>
-        <SafeAreaView style={[s.gifRoot, { backgroundColor: C.bg }]}>
+        <View style={[s.gifRoot, { backgroundColor: C.bg, paddingTop: Math.max(insets.top, 20) }]}>
           <View style={[s.gifHeader, { backgroundColor: C.surface, borderBottomColor: C.border }]}>
             <TouchableOpacity onPress={() => setShowGif(false)} style={{ flexDirection: 'row', alignItems: 'center', paddingRight: 12 }}>
               <Ionicons name="chevron-back" size={22} color={C.accent} />
@@ -1446,7 +1446,7 @@ export default function ChatScreen() {
               }
             />
           )}
-        </SafeAreaView>
+        </View>
       </Modal>
 
       {/* ── Sticker / Emoji Panel ── */}

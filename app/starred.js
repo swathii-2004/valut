@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, FlatList, ActivityIndicator } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { View, SafeAreaView, Text, StyleSheet, TouchableOpacity, FlatList, ActivityIndicator } from 'react-native';
+import { Ionicons }
+import { useSafeAreaInsets } from 'react-native-safe-area-context'; from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
@@ -9,6 +10,7 @@ import { Image } from 'expo-image';
 import * as legacyFS from 'expo-file-system/legacy';
 
 export default function StarredScreen() {
+    const insets = useSafeAreaInsets();
     const { theme: C } = useTheme();
     const { accessToken } = useAuth();
     const [messages, setMessages] = useState([]);
@@ -75,7 +77,7 @@ export default function StarredScreen() {
     };
 
     return (
-        <View style={[s.root, { backgroundColor: C.bg }]}>
+        <View style={[s.root, { backgroundColor: C.bg, paddingTop: Math.max(insets.top, 20) }]}>
             {/* Header */}
             <View style={[s.header, { backgroundColor: C.surface, borderBottomColor: C.border }]}>
                 <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
@@ -115,7 +117,7 @@ const s = StyleSheet.create({
     header: {
         height: 56, flexDirection: 'row', alignItems: 'center',
         justifyContent: 'space-between', borderBottomWidth: 1, paddingHorizontal: 16,
-        paddingTop: 44, // roughly status bar size
+        
     },
     backBtn: { flexDirection: 'row', alignItems: 'center', width: 70 },
     backText: { fontSize: 16, fontWeight: '500', marginLeft: 2 },
