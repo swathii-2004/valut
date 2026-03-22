@@ -1397,11 +1397,12 @@ export default function ChatScreen() {
       </Modal>
 
       {/* GIF Picker */}
-      <Modal visible={showGif} transparent={false} animationType="slide">
+      <Modal visible={showGif} transparent={false} animationType="slide" onRequestClose={() => setShowGif(false)}>
         <SafeAreaView style={[s.gifRoot, { backgroundColor: C.bg }]}>
           <View style={[s.gifHeader, { backgroundColor: C.surface, borderBottomColor: C.border }]}>
-            <TouchableOpacity onPress={() => setShowGif(false)}>
-              <Text style={[s.previewClose, { color: C.textSec }]}>✕</Text>
+            <TouchableOpacity onPress={() => setShowGif(false)} style={{ flexDirection: 'row', alignItems: 'center', paddingRight: 12 }}>
+              <Ionicons name="chevron-back" size={22} color={C.accent} />
+              <Text style={{ color: C.accent, fontWeight: '600', fontSize: 15 }}>Back</Text>
             </TouchableOpacity>
             <TextInput
               style={[s.gifInput, { backgroundColor: C.bg, color: C.textPrimary, borderColor: C.border }]}
