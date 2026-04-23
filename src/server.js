@@ -127,6 +127,13 @@ io.on('connection', (socket) => {
         }
     });
 
+    // ── message_delivered ── (receiver tells sender their message landed)
+    socket.on('message_delivered', ({ messageId }) => {
+        if (socket.currentRoom) {
+            socket.to(socket.currentRoom).emit('message_delivered_ack', { messageId });
+        }
+    });
+
     // ── disconnect ──
     socket.on('disconnect', () => {
         console.log(`[SOCKET] 🔌 Disconnected: ${email}`);
