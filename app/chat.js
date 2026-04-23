@@ -22,6 +22,7 @@ import { useTheme } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EMOJI_CATEGORIES, searchEmojis } from '../data/emojis';
 import apiClient from '../api/client';
+import { setIsChatActive } from '../utils/notificationState';
 
 const BASE_URL = 'https://couplvault.online';
 const TENOR_KEY = 'AIzaSyC0oPH0y72GDnDqHR0cJUFLBvpCi4n2XWw'; // Tenor API key
@@ -636,6 +637,12 @@ export default function ChatScreen() {
 
   useEffect(() => { if (myId) fetchMessages(); }, [myId]);
 
+  // Mark chat screen as active so foreground push notifications are suppressed
+  useEffect(() => {
+    setIsChatActive(true);
+    return () => setIsChatActive(false);
+  }, []);
+
   // Socket
   useEffect(() => {
     if (!accessToken || !myId) return;
@@ -650,6 +657,8 @@ export default function ChatScreen() {
         socket.emit('message_delivered', { messageId: msg.id });
       }
       if (msg.type === 'text' && isBirthdayMessage(msg.content)) triggerConfetti();
+      // Auto-scroll to bottom whenever a new message arrives
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
     });
     socket.on('message_delivered_ack', ({ messageId }) => {
       setMessages(prev => prev.map(m => m.id === messageId ? { ...m, is_delivered: true } : m));
@@ -1100,7 +1109,15 @@ export default function ChatScreen() {
       {showSearch && (
         <View style={{ padding: 10, backgroundColor: C.surface, borderBottomWidth: 1, borderBottomColor: C.border }}>
           <TextInput
-            style={{ backgroundColor: C.bg, color: C.textPrimary, padding: 10, borderRadius: 10 }}
+            style={{
+              backgroundColor: C.inputBg || C.surface,
+              color: C.textPrimary,
+              padding: 10,
+              borderRadius: 10,
+              borderWidth: 1,
+              borderColor: C.border,
+              fontSize: 15,
+            }}
             placeholder="Search messages..."
             placeholderTextColor={C.textSec}
             value={searchQuery}

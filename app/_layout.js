@@ -8,14 +8,37 @@ import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import apiClient from '../api/client';
+import { getIsChatActive } from '../utils/notificationState';
 
+// Suppress foreground notifications when the user is actively on the chat screen
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: true,
-  }),
+  handleNotification: async () => {
+    const chatActive = getIsChatActive();
+    return {
+      shouldShowAlert: !chatActive,
+      shouldPlaySound: !chatActive,
+      shouldSetBadge: !chatActive,
+    };
+  },
 });
+
+// Register notification action categories (Like + inline Reply)
+Notifications.setNotificationCategoryAsync('message', [
+  {
+    identifier: 'LIKE',
+    buttonTitle: '❤️ Like',
+    options: { opensAppToForeground: false },
+  },
+  {
+    identifier: 'REPLY',
+    buttonTitle: '💬 Reply',
+    textInput: {
+      submitButtonTitle: 'Send',
+      placeholder: 'Type a reply...',
+    },
+    options: { opensAppToForeground: false },
+  },
+]).catch(() => { });
 
 // Hardcoded projectId - most reliable approach for production APKs
 const EAS_PROJECT_ID = 'ba4ad1e5-bedc-4654-86e7-91277672c1b2';
@@ -102,14 +125,37 @@ function RootLayoutNav() {
       };
       saveToken();
 
-      // Show notifications when app is in foreground
+      // Log foreground notifications (suppressed if chat is active via setNotificationHandler)
       const foregroundSub = Notifications.addNotificationReceivedListener(notification => {
         console.log('[PUSH] Foreground notification received:', notification.request.content.title);
       });
 
-      // Handle notification taps
-      const responseSub = Notifications.addNotificationResponseReceivedListener(() => {
-        router.navigate('/chat');
+      // Handle notification taps and quick action buttons (Like / Reply)
+      const responseSub = Notifications.addNotificationResponseReceivedListener(async (response) => {
+        const { actionIdentifier, userText, notification } = response;
+        const data = notification.request.content.data || {};
+
+        if (actionIdentifier === 'LIKE' && data.messageId) {
+          // Send ❤️ reaction without opening the app
+          try {
+            await apiClient.post(`/api/messages/${data.messageId}/react`, { emoji: '❤️' });
+          } catch (e) {
+            console.log('[PUSH] Like action failed:', e.message);
+          }
+        } else if (actionIdentifier === 'REPLY' && data.messageId && userText?.trim()) {
+          // Send inline reply without opening the app
+          try {
+            await apiClient.post('/api/messages', {
+              content: userText.trim(),
+              reply_to_id: data.messageId,
+            });
+          } catch (e) {
+            console.log('[PUSH] Reply action failed:', e.message);
+          }
+        } else {
+          // Default tap — navigate to chat
+          router.navigate('/chat');
+        }
       });
 
       return () => {
