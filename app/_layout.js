@@ -4,36 +4,40 @@ import { AuthProvider, useAuth } from '../context/AuthContext';
 import { ThemeProvider } from '../context/ThemeContext';
 import { ActivityIndicator, View, Platform } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import apiClient from '../api/client';
 import { getIsChatActive } from '../utils/notificationState';
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => {
-    const chatActive = getIsChatActive();
-    return {
-      shouldShowAlert: !chatActive,
-      shouldPlaySound: !chatActive,
-      shouldSetBadge: !chatActive,
-    };
-  },
-});
-
-Notifications.setNotificationCategoryAsync('message', [
-  { identifier: 'LIKE', buttonTitle: '❤️ Like', options: { opensAppToForeground: false } },
-  {
-    identifier: 'REPLY', buttonTitle: '💬 Reply',
-    textInput: { submitButtonTitle: 'Send', placeholder: 'Type a reply...' },
-    options: { opensAppToForeground: false },
-  },
-]).catch(() => {});
+// expo-notifications is not supported in Expo Go (SDK 53+). Only import in real builds.
+const IS_EXPO_GO = Constants.appOwnership === 'expo';
+let Notifications = null;
+if (!IS_EXPO_GO) {
+  Notifications = require('expo-notifications');
+  Notifications.setNotificationHandler({
+    handleNotification: async () => {
+      const chatActive = getIsChatActive();
+      return {
+        shouldShowAlert: !chatActive,
+        shouldPlaySound: !chatActive,
+        shouldSetBadge: !chatActive,
+      };
+    },
+  });
+  Notifications.setNotificationCategoryAsync('message', [
+    { identifier: 'LIKE', buttonTitle: '❤️ Like', options: { opensAppToForeground: false } },
+    {
+      identifier: 'REPLY', buttonTitle: '💬 Reply',
+      textInput: { submitButtonTitle: 'Send', placeholder: 'Type a reply...' },
+      options: { opensAppToForeground: false },
+    },
+  ]).catch(() => {});
+}
 
 const EAS_PROJECT_ID = 'ba4ad1e5-bedc-4654-86e7-91277672c1b2';
 
 async function registerForPushNotificationsAsync() {
-  if (!Device.isDevice) return null;
+  if (IS_EXPO_GO || !Notifications || !Device.isDevice) return null;
   if (Platform.OS === 'android') {
     await Notifications.setNotificationChannelAsync('default', {
       name: 'Default', importance: Notifications.AndroidImportance.HIGH,
@@ -99,30 +103,29 @@ function RootLayoutNav() {
             try { await apiClient.post('/api/profile/push-token', { token }); } catch {}
           }
 
-          // Foreground notification handler
-          const foregroundSub = Notifications.addNotificationReceivedListener(n => {
-            console.log('[PUSH] Foreground:', n.request.content.title);
-          });
-
-          // Notification tap / action handler
-          const responseSub = Notifications.addNotificationResponseReceivedListener(async (response) => {
-            const { actionIdentifier, userText, notification } = response;
-            const data = notification.request.content.data || {};
-            if (actionIdentifier === 'LIKE' && data.messageId) {
-              try { await apiClient.post(`/api/messages/${data.messageId}/react`, { emoji: '❤️' }); } catch {}
-            } else if (actionIdentifier === 'REPLY' && data.messageId && userText?.trim()) {
-              try {
-                await apiClient.post('/api/messages', { content: userText.trim(), reply_to_id: data.messageId });
-              } catch {}
-            } else {
-              router.navigate('/chat');
-            }
-          });
-
-          return () => {
-            Notifications.removeNotificationSubscription(foregroundSub);
-            Notifications.removeNotificationSubscription(responseSub);
-          };
+          // Foreground & tap handlers — real builds only
+          if (!IS_EXPO_GO && Notifications) {
+            const foregroundSub = Notifications.addNotificationReceivedListener(n => {
+              console.log('[PUSH] Foreground:', n.request.content.title);
+            });
+            const responseSub = Notifications.addNotificationResponseReceivedListener(async (response) => {
+              const { actionIdentifier, userText, notification } = response;
+              const data = notification.request.content.data || {};
+              if (actionIdentifier === 'LIKE' && data.messageId) {
+                try { await apiClient.post(`/api/messages/${data.messageId}/react`, { emoji: '❤️' }); } catch {}
+              } else if (actionIdentifier === 'REPLY' && data.messageId && userText?.trim()) {
+                try {
+                  await apiClient.post('/api/messages', { content: userText.trim(), reply_to_id: data.messageId });
+                } catch {}
+              } else {
+                router.navigate('/chat');
+              }
+            });
+            return () => {
+              Notifications.removeNotificationSubscription(foregroundSub);
+              Notifications.removeNotificationSubscription(responseSub);
+            };
+          }
         } else {
           // Suspended or unknown
           await setVaultId(vault.id);

@@ -14,12 +14,22 @@ const { width: W, height: H } = Dimensions.get('window');
 
 export default function LoginScreen() {
   const { login } = useAuth();
+  const [mode, setMode] = useState('login'); // 'login' | 'register'
+  const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [showPass, setShowPass] = useState(false);
+  const [focusName, setFocusName] = useState(false);
   const [focusEmail, setFocusEmail] = useState(false);
   const [focusPass, setFocusPass] = useState(false);
+
+  const switchMode = (m) => {
+    setMode(m);
+    setEmail('');
+    setPassword('');
+    setDisplayName('');
+  };
 
   // Animations
   const heartScale = useRef(new Animated.Value(1)).current;
@@ -53,10 +63,45 @@ export default function LoginScreen() {
     try {
       const res = await axios.post(`${BASE_URL}/api/auth/login`, { email: email.trim(), password });
       await login(res.data);
-      router.replace('/chat');
+      router.replace('/'); // let _layout vault-check decide the route
     } catch (err) {
       const msg = err.response?.data?.error || err.response?.data?.message || 'Login failed. Check your credentials.';
       Alert.alert('Login Failed', msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRegister = async () => {
+    if (!displayName.trim() || !email.trim() || !password.trim()) {
+      Alert.alert('Missing fields', 'Please fill in all fields.');
+      return;
+    }
+    if (password.length < 12) {
+      Alert.alert('Weak password', 'Password must be at least 12 characters.');
+      return;
+    }
+    setLoading(true);
+    try {
+      // 1. Register the user
+      await axios.post(`${BASE_URL}/api/auth/register`, {
+        email: email.trim(),
+        password,
+        display_name: displayName.trim(),
+      });
+      
+      // 2. Login to get tokens
+      const loginRes = await axios.post(`${BASE_URL}/api/auth/login`, {
+        email: email.trim(), 
+        password
+      });
+
+      // 3. Save tokens and route
+      await login(loginRes.data);
+      router.replace('/'); // _layout will route to setup (no vault yet)
+    } catch (err) {
+      const msg = err.response?.data?.error || err.response?.data?.message || 'Registration failed.';
+      Alert.alert('Register Failed', msg);
     } finally {
       setLoading(false);
     }
@@ -84,8 +129,43 @@ export default function LoginScreen() {
 
         {/* Card */}
         <View style={s.card}>
-          <Text style={s.cardTitle}>Welcome back</Text>
-          <Text style={s.cardSub}>Sign in to your vault</Text>
+
+          {/* Tab Toggle */}
+          <View style={s.tabRow}>
+            <TouchableOpacity
+              style={[s.tab, mode === 'login' && s.tabActive]}
+              onPress={() => switchMode('login')}
+            >
+              <Text style={[s.tabText, mode === 'login' && s.tabTextActive]}>Sign In</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.tab, mode === 'register' && s.tabActive]}
+              onPress={() => switchMode('register')}
+            >
+              <Text style={[s.tabText, mode === 'register' && s.tabTextActive]}>Create Account</Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={s.cardTitle}>{mode === 'login' ? 'Welcome back' : 'Join Couple Vault'}</Text>
+          <Text style={s.cardSub}>{mode === 'login' ? 'Sign in to your vault' : 'Create your account'}</Text>
+
+          {/* Display Name — register only */}
+          {mode === 'register' && (
+            <View style={[s.inputWrap, focusName && s.inputWrapFocus]}>
+              <Ionicons name="person-outline" size={18} color={focusName ? '#8B2FC9' : '#A78EC0'} style={s.inputIcon} />
+              <TextInput
+                style={s.input}
+                placeholder="Your name"
+                placeholderTextColor="#B09CC8"
+                value={displayName}
+                onChangeText={setDisplayName}
+                autoCapitalize="words"
+                autoCorrect={false}
+                onFocus={() => setFocusName(true)}
+                onBlur={() => setFocusName(false)}
+              />
+            </View>
+          )}
 
           {/* Email */}
           <View style={[s.inputWrap, focusEmail && s.inputWrapFocus]}>
@@ -109,7 +189,7 @@ export default function LoginScreen() {
             <Ionicons name="lock-closed-outline" size={18} color={focusPass ? '#8B2FC9' : '#A78EC0'} style={s.inputIcon} />
             <TextInput
               style={[s.input, { flex: 1 }]}
-              placeholder="Password"
+              placeholder={mode === 'register' ? 'Password (min 12 chars)' : 'Password'}
               placeholderTextColor="#B09CC8"
               value={password}
               onChangeText={setPassword}
@@ -122,10 +202,10 @@ export default function LoginScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Sign In Button */}
+          {/* Action Button */}
           <TouchableOpacity
             style={[s.btn, loading && s.btnDisabled]}
-            onPress={handleLogin}
+            onPress={mode === 'login' ? handleLogin : handleRegister}
             disabled={loading}
             activeOpacity={0.82}
           >
@@ -133,8 +213,8 @@ export default function LoginScreen() {
               <ActivityIndicator color="#fff" />
             ) : (
               <View style={s.btnInner}>
-                <Text style={s.btnText}>Sign In</Text>
-                <Ionicons name="arrow-forward" size={18} color="#fff" />
+                <Text style={s.btnText}>{mode === 'login' ? 'Sign In' : 'Create Account'}</Text>
+                <Ionicons name={mode === 'login' ? 'arrow-forward' : 'person-add-outline'} size={18} color="#fff" />
               </View>
             )}
           </TouchableOpacity>
@@ -224,6 +304,18 @@ const s = StyleSheet.create({
   btnDisabled: { opacity: 0.7 },
   btnInner: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   btnText: { color: '#fff', fontWeight: '800', fontSize: 16, letterSpacing: 0.5 },
+
+  // Tab toggle
+  tabRow: {
+    flexDirection: 'row', backgroundColor: '#F5EEFF',
+    borderRadius: 12, padding: 4, marginBottom: 20,
+  },
+  tab: {
+    flex: 1, paddingVertical: 9, borderRadius: 10, alignItems: 'center',
+  },
+  tabActive: { backgroundColor: '#8B2FC9' },
+  tabText: { fontSize: 13, fontWeight: '700', color: '#A78EC0' },
+  tabTextActive: { color: '#fff' },
 
   // Footer
   footer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 28, marginBottom: 6 },
