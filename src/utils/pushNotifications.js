@@ -21,7 +21,7 @@ async function sendPushToUser(userId, title, body, data = {}) {
             return; // No valid token — silently skip
         }
 
-        const messages = [{
+        const pushObj = {
             to: token,
             sound: 'default',
             title,
@@ -29,7 +29,14 @@ async function sendPushToUser(userId, title, body, data = {}) {
             data,
             priority: 'high',
             channelId: 'messages',
-        }];
+        };
+        
+        // Map to Expo category ID defined in frontend _layout.js
+        if (data.type === 'message') {
+            pushObj.categoryId = 'message';
+        }
+
+        const messages = [pushObj];
 
         const chunks = expo.chunkPushNotifications(messages);
         for (const chunk of chunks) {
