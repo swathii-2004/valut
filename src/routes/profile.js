@@ -121,8 +121,8 @@ router.put('/display-name', authMiddleware, async (req, res) => {
     }
 });
 
-// POST /api/profile/push-token
-router.post('/push-token', authMiddleware, async (req, res) => {
+// POST /api/profile/push-token (and /token alias for older frontend builds)
+router.post(['/push-token', '/token'], authMiddleware, async (req, res) => {
     try {
         const { token } = req.body;
         if (!token) return res.status(400).json({ error: 'Token required' });
