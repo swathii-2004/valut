@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity, StyleSheet,
   KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
-  KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
   Dimensions, Modal, Pressable, ScrollView, SafeAreaView, AppState, PanResponder
 } from 'react-native';
 import Svg, { Path, SvgXml } from 'react-native-svg';
