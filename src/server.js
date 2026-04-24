@@ -41,6 +41,7 @@ app.use(rateLimit({
     windowMs: 15 * 60 * 1000,
     max     : 1000,
     message : { error: 'Too many requests' },
+    validate: { ip: false },
 }));
 
 // ── Auth rate limiter ──
@@ -48,6 +49,7 @@ const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max     : 50,
     message : { error: 'Too many auth attempts' },
+    validate: { ip: false },
 });
 
 // ── Routes ──
