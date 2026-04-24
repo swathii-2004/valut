@@ -54,19 +54,19 @@ The goal of Phase 5 was to expose the local development server to the internet s
 | DB_PORT | 5432 |
 | DB_NAME | couple_vault |
 | DB_USER | vault_app |
-| DB_PASSWORD | Vault@2026!SecurePass |
-| JWT_SECRET | f3a9b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1 |
-| ENCRYPTION_KEY_V1 | 9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e |
+| DB_PASSWORD | [REDACTED] |
+| JWT_SECRET | [REDACTED] |
+| ENCRYPTION_KEY_V1 | [REDACTED] |
 | ACTIVE_KEY_VERSION | 1 |
 | STORAGE_PATH | C:\Users\91812\desktop\couple-vault-api\vault |
 
 ### Cloudflare Account
 | Property | Value |
 |----------|-------|
-| Email | oldb70545@gmail.com |
+| Email | [REDACTED] |
 | Plan | Free |
-| Zone ID | aee35c38a968fa371b8b88d4745c1c97 |
-| Account ID | 4f2210f2589b66d48224b24db6643609 |
+| Zone ID | [REDACTED] |
+| Account ID | [REDACTED] |
 
 ### Domain
 | Property | Value |
@@ -82,8 +82,8 @@ The goal of Phase 5 was to expose the local development server to the internet s
 | Property | Value |
 |----------|-------|
 | Tunnel Name | couple-vault |
-| Tunnel ID | 37a151ef-4999-4100-add1-1ecd7028af75 |
-| Credentials File | `C:\Users\91812\.cloudflared\37a151ef-4999-4100-add1-1ecd7028af75.json` |
+| Tunnel ID | [REDACTED] |
+| Credentials File | [REDACTED] |
 | Cert File | `C:\Users\91812\.cloudflared\cert.pem` |
 | Config File | `C:\Users\91812\.cloudflared\config.yml` |
 | cloudflared Version | 2025.8.1 |

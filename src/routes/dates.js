@@ -1,25 +1,26 @@
-const express = require('express');
-const router = express.Router();
-const pool = require('../db/pool');
+// src/routes/dates.js
+// All queries scoped to req.vaultId (injected by verifyVaultMember).
+// getPartnerId() removed — partner is found via vault_members.
+'use strict';
+
+const express  = require('express');
+const router   = express.Router();
+const pool     = require('../db/pool');
 const authMiddleware = require('../middleware/auth');
+const { verifyVaultMember, verifyVaultActive } = require('../middleware/vault');
 
-async function getPartnerId(myId) {
-    const res = await pool.query(`SELECT id FROM users WHERE id != $1 LIMIT 1`, [myId]);
-    if (!res.rows.length) throw new Error('No partner found');
-    return res.rows[0].id;
-}
+const protect = [authMiddleware, verifyVaultMember, verifyVaultActive];
 
-// GET /api/dates — get all shared dates
-router.get('/', authMiddleware, async (req, res) => {
+// ══════════════════════════════════════════════
+// GET /api/dates — get all shared dates for vault
+// ══════════════════════════════════════════════
+router.get('/', protect, async (req, res) => {
     try {
-        const myId = req.user.sub;
-        const partnerId = await getPartnerId(myId);
-
         const result = await pool.query(
-            `SELECT * FROM special_dates 
-             WHERE user_id = $1 OR user_id = $2
+            `SELECT * FROM special_dates
+             WHERE vault_id = $1
              ORDER BY date ASC`,
-            [myId, partnerId]
+            [req.vaultId]
         );
         res.json(result.rows);
     } catch (err) {
@@ -28,25 +29,23 @@ router.get('/', authMiddleware, async (req, res) => {
     }
 });
 
+// ══════════════════════════════════════════════
 // POST /api/dates — add a new date
-router.post('/', authMiddleware, async (req, res) => {
+// ══════════════════════════════════════════════
+router.post('/', protect, async (req, res) => {
     try {
         const { title, date, is_recurring } = req.body;
         if (!title || !date) return res.status(400).json({ error: 'Title and date required' });
 
-        const myId = req.user.sub;
-
         const result = await pool.query(
-            `INSERT INTO special_dates (user_id, title, date, is_recurring)
-             VALUES ($1, $2, $3, $4) RETURNING *`,
-            [myId, title.trim(), date, !!is_recurring]
+            `INSERT INTO special_dates (vault_id, user_id, title, date, is_recurring)
+             VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+            [req.vaultId, req.user.sub, title.trim(), date, !!is_recurring]
         );
 
-        // Notify partner via sockets if connected
-        const partnerId = await getPartnerId(myId);
+        // Notify partner via vault-scoped socket room
         const socketState = require('../socket');
-        const roomId = [myId, partnerId].sort().join('_');
-        socketState.getIo()?.to(roomId).emit('new_date', result.rows[0]);
+        socketState.getIo()?.to(`vault:${req.vaultId}`).emit('new_date', result.rows[0]);
 
         res.status(201).json(result.rows[0]);
     } catch (err) {
@@ -55,27 +54,28 @@ router.post('/', authMiddleware, async (req, res) => {
     }
 });
 
+// ══════════════════════════════════════════════
 // DELETE /api/dates/:id
-router.delete('/:id', authMiddleware, async (req, res) => {
+// Both vault members can delete a shared date.
+// ══════════════════════════════════════════════
+router.delete('/:id', protect, async (req, res) => {
     try {
         const { id } = req.params;
-        const myId = req.user.sub;
 
-        // Only allow deleting if they own it, or maybe allow partner to delete too?
-        // Let's allow the owner or partner to delete it for now since it's a shared vault.
-        const partnerId = await getPartnerId(myId);
-
+        // Verify the date belongs to this vault before deleting
         const result = await pool.query(
-            `DELETE FROM special_dates WHERE id = $1 AND (user_id = $2 OR user_id = $3) RETURNING id`,
-            [id, myId, partnerId]
+            `DELETE FROM special_dates
+             WHERE id = $1 AND vault_id = $2
+             RETURNING id`,
+            [id, req.vaultId]
         );
 
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Date not found or unauthorized' });
+        if (!result.rows.length) {
+            return res.status(404).json({ error: 'Date not found or unauthorized' });
+        }
 
-        // Notify partner via sockets
         const socketState = require('../socket');
-        const roomId = [myId, partnerId].sort().join('_');
-        socketState.getIo()?.to(roomId).emit('deleted_date', { id });
+        socketState.getIo()?.to(`vault:${req.vaultId}`).emit('deleted_date', { id });
 
         res.json({ success: true });
     } catch (err) {
