@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity, StyleSheet,
   KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
-  Dimensions, Modal, Pressable, ScrollView, SafeAreaView, AppState
+  KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
+  Dimensions, Modal, Pressable, ScrollView, SafeAreaView, AppState, PanResponder
 } from 'react-native';
+import Svg, { Path, SvgXml } from 'react-native-svg';
 import Animated, { useSharedValue, withRepeat, withTiming, withSequence, withDelay } from 'react-native-reanimated';
 import { Swipeable } from 'react-native-gesture-handler';
 import { Image } from 'expo-image';
@@ -275,6 +277,14 @@ const MessageBubble = React.memo(({ msg, myId, token, C, onLongPress, onImagePre
                     contentFit="cover"
                     onError={() => console.log('[GIF ERROR] failed to load:', content?.slice(0, 60))}
                   />
+                </View>
+              );
+            }
+            if (content.startsWith('DOODLE::')) {
+              const svgData = content.replace('DOODLE::', '');
+              return (
+                <View style={{ marginVertical: 4, alignItems: 'center' }}>
+                  <SvgXml xml={svgData} width={200} height={200 * 0.7} />
                 </View>
               );
             }
@@ -551,6 +561,60 @@ export default function ChatScreen() {
   const [showActions, setShowActions] = useState(false);
   const [showAttach, setShowAttach] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+
+  // ── Doodle Pad State ───────────────────────────────────
+  const [showDoodle, setShowDoodle] = useState(false);
+  const [doodlePaths, setDoodlePaths] = useState([]);
+  const [currentPath, setCurrentPath] = useState('');
+  const [doodleColor, setDoodleColor] = useState('#E4387A');
+
+  const { width, height } = Dimensions.get('window');
+
+  const currentPathRef = useRef('');
+  const doodleColorRef = useRef('#E4387A');
+
+  useEffect(() => { currentPathRef.current = currentPath; }, [currentPath]);
+  useEffect(() => { doodleColorRef.current = doodleColor; }, [doodleColor]);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (e) => {
+        const p = `M${e.nativeEvent.locationX},${e.nativeEvent.locationY}`;
+        currentPathRef.current = p;
+        setCurrentPath(p);
+      },
+      onPanResponderMove: (e) => {
+        const p = `${currentPathRef.current} L${e.nativeEvent.locationX},${e.nativeEvent.locationY}`;
+        currentPathRef.current = p;
+        setCurrentPath(p);
+      },
+      onPanResponderRelease: () => {
+        if (currentPathRef.current) {
+          setDoodlePaths(prev => [...prev, { path: currentPathRef.current, color: doodleColorRef.current }]);
+          currentPathRef.current = '';
+          setCurrentPath('');
+        }
+      },
+    })
+  ).current;
+
+  const sendDoodle = async () => {
+    setShowDoodle(false);
+    if (!doodlePaths.length) return;
+    
+    const svgContent = doodlePaths.map(p => `<path d="${p.path}" stroke="${p.color}" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round" />`).join('');
+    const fullSvg = `<svg viewBox="0 0 ${width} ${height * 0.7}" xmlns="http://www.w3.org/2000/svg">${svgContent}</svg>`;
+    
+    try {
+      const res = await apiClient.post('/api/messages', { content: `DOODLE::${fullSvg}`, type: 'text' });
+      const newMsg = res.data.message;
+      if (newMsg) setMessages(prev => prev.find(m => m.id === newMsg.id) ? prev : [...prev, newMsg]);
+    } catch { Alert.alert('Error', 'Failed to send doodle'); }
+    
+    setDoodlePaths([]);
+  };
 
   const [showStickers, setShowStickers] = useState(false);
   const [reactingMode, setReactingMode] = useState(false);
@@ -1425,9 +1489,13 @@ export default function ChatScreen() {
                 { label: 'Camera', key: 'camera', ionicon: 'camera', bg: C.accentSoft },
                 { label: 'Gallery', key: 'gallery', ionicon: 'images', bg: C.accentSoft },
                 { label: 'File', key: 'file', ionicon: 'document-text', bg: C.accentSoft },
+                { label: 'Doodle', key: 'doodle', ionicon: 'brush', bg: C.accentSoft },
                 { label: 'Thinking of You', key: 'thinking_of_you', ionicon: 'heart', bg: '#FFE4E8' },
               ].map(item => (
-                <TouchableOpacity key={item.key} style={s.attachCard} onPress={() => pickMedia(item.key)}>
+                <TouchableOpacity key={item.key} style={s.attachCard} onPress={() => {
+                  if (item.key === 'doodle') { setShowAttach(false); setShowDoodle(true); }
+                  else pickMedia(item.key);
+                }}>
                   <View style={[s.attachIconBox, { backgroundColor: item.bg, borderColor: C.border, borderWidth: item.key === 'thinking_of_you' ? 0 : 1 }]}>
                     <Ionicons name={item.ionicon} size={28} color={item.key === 'thinking_of_you' ? '#FF477E' : C.accent} />
                   </View>
@@ -1482,6 +1550,100 @@ export default function ChatScreen() {
                 ))}
               </View>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Doodle Pad Modal */}
+      <Modal visible={showDoodle} transparent={false} animationType="slide" onRequestClose={() => setShowDoodle(false)}>
+        <View style={[s.previewRoot, { backgroundColor: C.bg, paddingTop: Math.max(insets.top, 20) }]}>
+          <View style={[s.previewHeader, { backgroundColor: C.surface, borderBottomColor: C.border }]}>
+            <TouchableOpacity onPress={() => setShowDoodle(false)}>
+              <Text style={[s.previewClose, { color: C.textSec }]}>✕</Text>
+            </TouchableOpacity>
+            <Text style={[s.previewTitle, { color: C.textPrimary }]}>Doodle</Text>
+            <TouchableOpacity style={[s.previewSendBtn, { backgroundColor: C.accent }]} onPress={sendDoodle}>
+              <Text style={s.previewSendText}>Send ↑</Text>
+            </TouchableOpacity>
+          </View>
+          
+          <View style={{ flex: 1, backgroundColor: C.surface }} {...panResponder.panHandlers}>
+            <Svg style={{ flex: 1 }}>
+              {doodlePaths.map((p, i) => (
+                <Path key={i} d={p.path} stroke={p.color} strokeWidth={4} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              ))}
+              {currentPath ? (
+                <Path d={currentPath} stroke={doodleColor} strokeWidth={4} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              ) : null}
+            </Svg>
+          </View>
+
+          {/* Doodle Toolbar */}
+          <View style={[s.viewModeRow, { backgroundColor: C.surface, paddingBottom: Math.max(insets.bottom, 20), paddingTop: 10 }]}>
+            <TouchableOpacity onPress={() => { setDoodlePaths([]); setCurrentPath(''); }} style={{ padding: 10 }}>
+              <Ionicons name="trash-outline" size={24} color={C.textSec} />
+            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 12, flex: 1, justifyContent: 'center' }}>
+              {['#E4387A', '#000000', '#FFFFFF', '#4A90E2', '#50E3C2', '#F5A623'].map(c => (
+                <TouchableOpacity 
+                  key={c} 
+                  onPress={() => setDoodleColor(c)}
+                  style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: c, borderWidth: 2, borderColor: doodleColor === c ? (c === '#FFFFFF' ? '#000' : '#FFF') : 'transparent', elevation: doodleColor === c ? 4 : 0 }} 
+                />
+              ))}
+            </View>
+            <TouchableOpacity onPress={() => {
+              setDoodlePaths(prev => prev.slice(0, -1));
+            }} style={{ padding: 10 }}>
+              <Ionicons name="arrow-undo-outline" size={24} color={C.textSec} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Doodle Pad Modal */}
+      <Modal visible={showDoodle} transparent={false} animationType="slide" onRequestClose={() => setShowDoodle(false)}>
+        <View style={[s.previewRoot, { backgroundColor: C.bg, paddingTop: Math.max(insets.top, 20) }]}>
+          <View style={[s.previewHeader, { backgroundColor: C.surface, borderBottomColor: C.border }]}>
+            <TouchableOpacity onPress={() => setShowDoodle(false)}>
+              <Text style={[s.previewClose, { color: C.textSec }]}>✕</Text>
+            </TouchableOpacity>
+            <Text style={[s.previewTitle, { color: C.textPrimary }]}>Doodle</Text>
+            <TouchableOpacity style={[s.previewSendBtn, { backgroundColor: C.accent }]} onPress={sendDoodle}>
+              <Text style={s.previewSendText}>Send ↑</Text>
+            </TouchableOpacity>
+          </View>
+          
+          <View style={{ flex: 1, backgroundColor: C.surface }} {...panResponder.panHandlers}>
+            <Svg style={{ flex: 1 }}>
+              {doodlePaths.map((p, i) => (
+                <Path key={i} d={p.path} stroke={p.color} strokeWidth={4} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              ))}
+              {currentPath ? (
+                <Path d={currentPath} stroke={doodleColor} strokeWidth={4} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              ) : null}
+            </Svg>
+          </View>
+
+          {/* Doodle Toolbar */}
+          <View style={[s.viewModeRow, { backgroundColor: C.surface, paddingBottom: Math.max(insets.bottom, 20), paddingTop: 10 }]}>
+            <TouchableOpacity onPress={() => { setDoodlePaths([]); setCurrentPath(''); currentPathRef.current = ''; }} style={{ padding: 10 }}>
+              <Ionicons name="trash-outline" size={24} color={C.textSec} />
+            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 12, flex: 1, justifyContent: 'center' }}>
+              {['#E4387A', '#000000', '#FFFFFF', '#4A90E2', '#50E3C2', '#F5A623'].map(c => (
+                <TouchableOpacity 
+                  key={c} 
+                  onPress={() => setDoodleColor(c)}
+                  style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: c, borderWidth: 2, borderColor: doodleColor === c ? (c === '#FFFFFF' ? '#000' : '#FFF') : 'transparent', elevation: doodleColor === c ? 4 : 0 }} 
+                />
+              ))}
+            </View>
+            <TouchableOpacity onPress={() => {
+              setDoodlePaths(prev => prev.slice(0, -1));
+            }} style={{ padding: 10 }}>
+              <Ionicons name="arrow-undo-outline" size={24} color={C.textSec} />
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
