@@ -16,11 +16,11 @@ if (!IS_EXPO_GO) {
   Notifications = require('expo-notifications');
   Notifications.setNotificationHandler({
     handleNotification: async () => {
-      const chatActive = getIsChatActive();
+      // Unconditionally silence notifications when the app is in the foreground
       return {
-        shouldShowAlert: !chatActive,
-        shouldPlaySound: !chatActive,
-        shouldSetBadge: !chatActive,
+        shouldShowAlert: false,
+        shouldPlaySound: false,
+        shouldSetBadge: false,
       };
     },
   });

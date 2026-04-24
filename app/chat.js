@@ -657,8 +657,8 @@ export default function ChatScreen() {
         socket.emit('message_delivered', { messageId: msg.id });
       }
       if (msg.type === 'text' && isBirthdayMessage(msg.content)) triggerConfetti();
-      // Auto-scroll to bottom whenever a new message arrives
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+      // Auto-scroll to bottom whenever a new message arrives, with a longer timeout to ensure render
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 300);
     });
     socket.on('message_delivered_ack', ({ messageId }) => {
       setMessages(prev => prev.map(m => m.id === messageId ? { ...m, is_delivered: true } : m));
@@ -1205,7 +1205,7 @@ export default function ChatScreen() {
           }
           contentContainerStyle={listData.length === 0 ? { flex: 1 } : { padding: 12, paddingBottom: 8 }}
           onLayout={() => flatListRef.current?.scrollToEnd({ animated: false })}
-          onContentSizeChange={() => { if (!showScrollBtn) flatListRef.current?.scrollToEnd({ animated: false }); }}
+          onContentSizeChange={() => { if (!showScrollBtn) flatListRef.current?.scrollToEnd({ animated: true }); }}
           onScroll={handleScroll}
           scrollEventThrottle={100}
         />
