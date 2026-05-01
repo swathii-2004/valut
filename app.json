@@ -64,6 +64,7 @@
       "reactCompiler": true
     },
     "extra": {
+      "apiUrl": "https://couplvault.online",
       "router": {},
       "eas": {
         "projectId": "ba4ad1e5-bedc-4654-86e7-91277672c1b2"

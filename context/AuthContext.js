@@ -1,8 +1,18 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import * as SecureStore from 'expo-secure-store';
 import { generateIdentityKeyPair } from '../utils/crypto';
-import axios from 'axios';
+import apiClient from '../api/client';
 import Constants from 'expo-constants';
+import { Buffer } from 'buffer';
+
+function parseUserIdFromToken(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(Buffer.from(b64, 'base64').toString('utf8')).sub || null;
+  } catch {
+    return null;
+  }
+}
 
 const AuthContext = createContext(null);
 
@@ -19,17 +29,20 @@ const API_URL = Constants.expoConfig.extra?.apiUrl || 'http://localhost:3000';
 
 export function AuthProvider({ children }) {
   const [accessToken,  setAccessToken]  = useState(null);
+  const [userId,       setUserId]       = useState(null);
   const [vaultId,      setVaultIdState] = useState(null);
   const [vaultStatus,  setVaultStatusState] = useState(null);
   const [identityKey,   setIdentityKey]  = useState(null); // Private Key (Encryption)
   const [signingKey,    setSigningKey]   = useState(null); // Private Key (Signing)
   const [deviceId,      setDeviceId]     = useState(null);
   const [lastCounter,   setLastCounterState] = useState(0);
+  const [vaultKeyMap,   setVaultKeyMap]  = useState({});
   const [loading,      setLoading]      = useState(true);
 
   useEffect(() => {
     (async () => {
-        const [token, vid, vstatus, privKey, did, cnt] = await Promise.all([
+      try {
+        const [token, vid, vstatus, privKey, signKey, did, cnt] = await Promise.all([
           SecureStore.getItemAsync(ACCESS_TOKEN_KEY),
           SecureStore.getItemAsync(VAULT_ID_KEY),
           SecureStore.getItemAsync(VAULT_STATUS_KEY),
@@ -38,7 +51,7 @@ export function AuthProvider({ children }) {
           SecureStore.getItemAsync(DEVICE_ID_KEY),
           SecureStore.getItemAsync(LAST_COUNTER_KEY),
         ]);
-        if (token)   setAccessToken(token);
+        if (token)   { setAccessToken(token); setUserId(parseUserIdFromToken(token)); }
         if (vid)     setVaultIdState(vid);
         if (vstatus) setVaultStatusState(vstatus);
         if (privKey) setIdentityKey(privKey);
@@ -61,9 +74,26 @@ export function AuthProvider({ children }) {
   const login = async (tokens) => {
     const accessTok  = tokens.accessToken  || tokens.access_token;
     const refreshTok = tokens.refreshToken || tokens.refresh_token;
+
+    // A new explicit login MUST generate a new device identity
+    // (In case the user switched accounts but SecureStore persisted old keys)
+    await Promise.all([
+      SecureStore.deleteItemAsync(IDENTITY_PRIV_KEY),
+      SecureStore.deleteItemAsync(SIGNING_PRIV_KEY),
+      SecureStore.deleteItemAsync(DEVICE_ID_KEY),
+      SecureStore.deleteItemAsync(VAULT_ID_KEY),
+      SecureStore.deleteItemAsync(VAULT_STATUS_KEY)
+    ]);
+    setIdentityKey(null);
+    setSigningKey(null);
+    setDeviceId(null);
+    setVaultIdState(null);
+    setVaultStatusState(null);
+
     await SecureStore.setItemAsync(ACCESS_TOKEN_KEY,  accessTok);
     await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, refreshTok);
     setAccessToken(accessTok);
+    setUserId(parseUserIdFromToken(accessTok));
     
     // Bootstrap E2EE identity after login
     await bootstrapIdentity(accessTok);
@@ -85,12 +115,10 @@ export function AuthProvider({ children }) {
         const finalSignKey = signKey || keys.signingPrivateKey;
 
         // Register/Update device with server
-        const resp = await axios.post(`${API_URL}/api/devices`, {
+        const resp = await apiClient.post('/api/devices', {
           identity_public_key: keys.publicKey, // This will upsert based on the server logic
           signing_public_key: keys.signingPublicKey,
           device_name: Constants.deviceName || 'Mobile Device'
-        }, {
-          headers: { Authorization: `Bearer ${token}` }
         });
 
         did = resp.data.id;
@@ -125,12 +153,14 @@ export function AuthProvider({ children }) {
       SecureStore.deleteItemAsync(LAST_COUNTER_KEY),
     ]);
     setAccessToken(null);
+    setUserId(null);
     setVaultIdState(null);
     setVaultStatusState(null);
     setIdentityKey(null);
     setSigningKey(null);
     setDeviceId(null);
     setLastCounterState(0);
+    setVaultKeyMap({});
   };
 
   const updateLastCounter = async (newVal) => {
@@ -145,6 +175,7 @@ export function AuthProvider({ children }) {
   const updateAccessToken = async (newToken) => {
     await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, newToken);
     setAccessToken(newToken);
+    setUserId(parseUserIdFromToken(newToken));
   };
 
   const setVaultId = async (id) => {
@@ -161,10 +192,11 @@ export function AuthProvider({ children }) {
 
   return (
     <AuthContext.Provider value={{
-      accessToken, loading,
+      accessToken, userId, loading,
       vaultId, vaultStatus,
       identityKey, signingKey, deviceId,
       lastCounter, updateLastCounter,
+      vaultKeyMap, setVaultKeyMap,
       login, logout,
       getRefreshToken, updateAccessToken,
       setVaultId, setVaultStatus,

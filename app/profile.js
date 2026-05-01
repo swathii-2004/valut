@@ -34,15 +34,18 @@ export default function ProfileScreen() {
 
   const loadProfiles = async () => {
     try {
-      const [meRes, partnerRes] = await Promise.all([
-        apiClient.get('/api/profile/me'),
-        apiClient.get('/api/profile/partner'),
-      ]);
+      const meRes = await apiClient.get('/api/profile/me');
       setMe(meRes.data);
-      setPartner(partnerRes.data);
       setNewName(meRes.data.display_name || '');
+
+      try {
+        const partnerRes = await apiClient.get('/api/profile/partner');
+        setPartner(partnerRes.data);
+      } catch (partnerErr) {
+        setPartner(null);
+      }
     } catch (e) {
-      Alert.alert('Error', 'Failed to load profiles');
+      Alert.alert('Error', 'Failed to load profile');
     } finally {
       setLoading(false);
     }

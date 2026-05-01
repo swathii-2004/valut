@@ -62,8 +62,7 @@ export default function LoginScreen() {
     setLoading(true);
     try {
       const res = await axios.post(`${BASE_URL}/api/auth/login`, { email: email.trim(), password });
-      await login(res.data);
-      router.replace('/'); // let _layout vault-check decide the route
+      await login(res.data); // _layout.js routes when accessToken changes
     } catch (err) {
       const msg = err.response?.data?.error || err.response?.data?.message || 'Login failed. Check your credentials.';
       Alert.alert('Login Failed', msg);
@@ -96,9 +95,8 @@ export default function LoginScreen() {
         password
       });
 
-      // 3. Save tokens and route
+      // 3. Save tokens — _layout.js will route when accessToken changes
       await login(loginRes.data);
-      router.replace('/'); // _layout will route to setup (no vault yet)
     } catch (err) {
       const msg = err.response?.data?.error || err.response?.data?.message || 'Registration failed.';
       Alert.alert('Register Failed', msg);

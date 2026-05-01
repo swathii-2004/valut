@@ -15,7 +15,7 @@ import crypto from 'react-native-quick-crypto';
 const CODE_LENGTH = 8;
 
 export default function JoinVaultScreen() {
-  const { setVaultId, setVaultStatus, identityKey, deviceId } = useAuth();
+  const { setVaultId, setVaultStatus, identityKey, deviceId, userId } = useAuth();
   const [chars, setChars]   = useState(Array(CODE_LENGTH).fill(''));
   const [loading, setLoading] = useState(false);
   const inputs = useRef([]);
@@ -59,12 +59,9 @@ export default function JoinVaultScreen() {
       const devicesRes = await apiClient.get('/api/devices/partner');
       const partnerDevices = devicesRes.data.devices || [];
 
-      const verifiedDevices = partnerDevices.filter(d => d.is_verified);
-      const unverifiedCount = partnerDevices.length - verifiedDevices.length;
-
-      // 3. Encrypt for each VERIFIED partner device
+      // 3. Encrypt for ALL partner devices (verification only required for key rotations, not initial setup)
       const keyUploads = [];
-      for (const dev of verifiedDevices) {
+      for (const dev of partnerDevices) {
         const encrypted = encryptVaultKey(newVaultKey, dev.identity_public_key);
         keyUploads.push({
           vault_id: vaultId,
@@ -77,20 +74,19 @@ export default function JoinVaultScreen() {
       }
 
       // 4. Encrypt for MY OWN device (Partner B)
-      const myPublicHex = crypto.createECDH('x25519').setPrivateKey(Buffer.from(identityKey, 'hex')).getPublicKey('hex');
+      const myDevicesRes = await apiClient.get('/api/devices');
+      const myDevice = myDevicesRes.data.devices.find(d => String(d.id) === String(deviceId));
+      if (!myDevice) throw new Error('Could not find my own device public key');
+      const myPublicHex = myDevice.identity_public_key;
       const myEncrypted = encryptVaultKey(newVaultKey, myPublicHex);
       keyUploads.push({
         vault_id: vaultId,
-        target_user_id: null,
+        target_user_id: userId,
         target_device_id: deviceId,
         encrypted_key: myEncrypted.encryptedKey,
         ephemeral_public_key: myEncrypted.ephemeralPublicKey,
         key_version: 1
       });
-
-      if (unverifiedCount > 0) {
-        console.warn(`[E2EE] ⚠️ Skipping ${unverifiedCount} unverified partner devices.`);
-      }
 
       // 5. Upload all encrypted keys
       await Promise.all(keyUploads.map(k => apiClient.post('/api/keys/vault', k)));

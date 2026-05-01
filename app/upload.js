@@ -8,7 +8,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import apiClient from '../api/client';
 import { useAuth } from '../context/AuthContext';
-import { encryptMessage } from '../utils/crypto';
+import { encryptMessage, decryptVaultKey } from '../utils/crypto';
 import * as FileSystem from 'expo-file-system';
 import { Buffer } from 'buffer';
 import crypto from 'react-native-quick-crypto';
@@ -72,7 +72,6 @@ export default function UploadScreen() {
       // 1. Fetch & Decrypt Vault Key (if not already in memory)
       const keysRes = await apiClient.get(`/api/keys/vault/${vaultId}`);
       const myKeyObj = keysRes.data.keys.find(k => k.key_version === 1); // Simplification
-      const { decryptVaultKey } = require('../utils/crypto');
       const vKey = decryptVaultKey(myKeyObj.encrypted_key, myKeyObj.ephemeral_public_key, identityKey);
 
       // 2. Read File and Encrypt with AAD

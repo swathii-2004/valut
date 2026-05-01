@@ -11,6 +11,7 @@ import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ScreenCapture from 'expo-screen-capture';
 import { useAuth } from '../context/AuthContext';
+import { decryptMessage } from '../utils/crypto';
 
 const { width, height } = Dimensions.get('window');
 const BASE_URL = 'https://couplvault.online';
@@ -97,8 +98,8 @@ const ap = StyleSheet.create({
 
 // ── Main View Screen ───────────────────────────────────
 export default function ViewScreen() {
-  const { id, name, mime } = useLocalSearchParams();
-  const { accessToken } = useAuth();
+  const { id, name, mime, is_e2ee, key_version, sender_id } = useLocalSearchParams();
+  const { accessToken, vaultKeyMap, vaultId: authVaultId } = useAuth();
 
   useEffect(() => {
     ScreenCapture.preventScreenCaptureAsync();
@@ -111,10 +112,41 @@ export default function ViewScreen() {
   const [error, setError] = useState(null);
 
   const fileUrl = `${BASE_URL}/api/files/${id}/view`;
+  const isE2EE = is_e2ee === 'true' || is_e2ee === true;
   const isImage = mime?.startsWith('image/');
   const isVideo = mime?.startsWith('video/');
   const isAudio = mime?.startsWith('audio/');
   const isPdf = mime === 'application/pdf';
+
+  // Decrypt E2EE image to a data URI
+  useEffect(() => {
+    if (!isImage || !isE2EE || !id || !accessToken) return;
+    const vKey = vaultKeyMap[parseInt(key_version, 10) || 1];
+    if (!vKey || !authVaultId) return;
+    (async () => {
+      try {
+        setDownloading(true);
+        const res = await fetch(`${fileUrl}?token=${accessToken}`);
+        if (!res.ok) { setError('Failed to load image'); return; }
+        const rawFile = await res.text();
+        let payload;
+        try { payload = JSON.parse(rawFile); } catch { setError('Image data is corrupted'); return; }
+        if (!payload?.blob) { setError('Image data is corrupted'); return; }
+        const decrypted = decryptMessage(payload.blob, vKey, -1, {
+          metadata: { v: authVaultId, s: sender_id },
+          c: payload.counter,
+          partnerSigningPublicKey: null
+        });
+        console.log('[VIEW] decrypted length:', decrypted?.text?.length);
+        setLocalUri(`data:${mime || 'image/jpeg'};base64,${decrypted.text}`);
+      } catch (e) {
+        console.warn('[VIEW] E2EE image decrypt failed:', e.message);
+        setError('Could not decrypt image');
+      } finally {
+        setDownloading(false);
+      }
+    })();
+  }, [id, isE2EE, vaultKeyMap, authVaultId]);
 
   // Download video/audio to cache
   useEffect(() => {
@@ -152,10 +184,15 @@ export default function ViewScreen() {
     if (!accessToken) return <ActivityIndicator color="#E4387A" />;
 
     if (isImage) {
-      const imageUrl = `${fileUrl}?token=${accessToken}`;
+      if (isE2EE) {
+        if (downloading) return <View style={s.center}><ActivityIndicator color="#E4387A" size="large" /></View>;
+        if (error) return <View style={s.center}><Text style={s.errorText}>{error}</Text></View>;
+        if (!localUri) return <View style={s.center}><ActivityIndicator color="#E4387A" size="large" /></View>;
+        return <Image source={{ uri: localUri }} style={s.image} contentFit="contain" cachePolicy="none" />;
+      }
       return (
         <Image
-          source={{ uri: imageUrl }}
+          source={{ uri: `${fileUrl}?token=${accessToken}` }}
           style={s.image}
           contentFit="contain"
           cachePolicy="none"

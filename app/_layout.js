@@ -25,12 +25,8 @@ if (!IS_EXPO_GO) {
     },
   });
   Notifications.setNotificationCategoryAsync('message', [
-    { identifier: 'LIKE', buttonTitle: '❤️ Like', options: { opensAppToForeground: false } },
-    {
-      identifier: 'REPLY', buttonTitle: '💬 Reply',
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Type a reply...' },
-      options: { opensAppToForeground: false },
-    },
+    { identifier: 'LIKE', buttonTitle: '❤️ Like', options: { opensAppToForeground: false } }
+    // REPLY action disabled for E2EE security (requires app foreground to access Vault Key)
   ]).catch(() => {});
 }
 
@@ -113,12 +109,8 @@ function RootLayoutNav() {
               const data = notification.request.content.data || {};
               if (actionIdentifier === 'LIKE' && data.messageId) {
                 try { await apiClient.post(`/api/messages/${data.messageId}/react`, { emoji: '❤️' }); } catch {}
-              } else if (actionIdentifier === 'REPLY' && data.messageId && userText?.trim()) {
-                try {
-                  await apiClient.post('/api/messages', { content: userText.trim(), reply_to_id: data.messageId });
-                } catch {}
               } else {
-                router.navigate('/chat');
+                setTimeout(() => router.navigate('/chat'), 500);
               }
             });
             return () => {

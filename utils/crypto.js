@@ -14,19 +14,19 @@ import crypto from 'react-native-quick-crypto';
 import { Buffer } from 'buffer';
 
 /**
- * 1. Generate Identity Key Pair (X25519)
+ * 1. Generate Identity Key Pair (X25519 + Ed25519)
+ * Keys are exported as DER-encoded hex strings for storage and transport.
+ * Use createPublicKey/createPrivateKey to reconstruct KeyObjects for crypto ops.
  */
 export const generateIdentityKeyPair = () => {
-  // X25519 for Encryption (Key Exchange)
-  const x25519 = crypto.generateKeyPairSync('x25519');
-  // Ed25519 for Identity (Signing)
+  const x25519  = crypto.generateKeyPairSync('x25519');
   const ed25519 = crypto.generateKeyPairSync('ed25519');
-  
+
   return {
-    publicKey: x25519.publicKey.toString('hex'),
-    privateKey: x25519.privateKey.toString('hex'),
-    signingPublicKey: ed25519.publicKey.toString('hex'),
-    signingPrivateKey: ed25519.privateKey.toString('hex'),
+    publicKey:        x25519.publicKey.export({ type: 'spki',  format: 'der' }).toString('hex'),
+    privateKey:       x25519.privateKey.export({ type: 'pkcs8', format: 'der' }).toString('hex'),
+    signingPublicKey:  ed25519.publicKey.export({ type: 'spki',  format: 'der' }).toString('hex'),
+    signingPrivateKey: ed25519.privateKey.export({ type: 'pkcs8', format: 'der' }).toString('hex'),
   };
 };
 
@@ -34,8 +34,8 @@ export const generateIdentityKeyPair = () => {
  * 1.1 Sign Message (Ed25519)
  */
 export const signMessage = (data, privateKeyHex) => {
-  const privateKey = Buffer.from(privateKeyHex, 'hex');
-  const signature = crypto.sign(null, Buffer.from(data), privateKey);
+  const privateKey = crypto.createPrivateKey({ key: Buffer.from(privateKeyHex, 'hex'), format: 'der', type: 'pkcs8' });
+  const signature  = crypto.sign(null, Buffer.from(data), privateKey);
   return signature.toString('hex');
 };
 
@@ -43,7 +43,7 @@ export const signMessage = (data, privateKeyHex) => {
  * 1.2 Verify Signature (Ed25519)
  */
 export const verifySignature = (data, signatureHex, publicKeyHex) => {
-  const publicKey = Buffer.from(publicKeyHex, 'hex');
+  const publicKey = crypto.createPublicKey({ key: Buffer.from(publicKeyHex, 'hex'), format: 'der', type: 'spki' });
   const signature = Buffer.from(signatureHex, 'hex');
   return crypto.verify(null, Buffer.from(data), publicKey, signature);
 };
@@ -64,29 +64,29 @@ export const getFingerprint = (publicKeyHex) => {
  * 3. Encrypt Vault Key for Partner (Handshake)
  */
 export const encryptVaultKey = (vaultKeyHex, partnerPublicKeyHex) => {
-  const vaultKey = Buffer.from(vaultKeyHex, 'hex');
-  const partnerPubKey = Buffer.from(partnerPublicKeyHex, 'hex');
-  
+  const vaultKey      = Buffer.from(vaultKeyHex, 'hex');
+  const partnerPubKey = crypto.createPublicKey({ key: Buffer.from(partnerPublicKeyHex, 'hex'), format: 'der', type: 'spki' });
+
   const { publicKey: ephemeralPubKey, privateKey: ephemeralPrivKey } = crypto.generateKeyPairSync('x25519');
-  
+
   const sharedSecret = crypto.diffieHellman({
     privateKey: ephemeralPrivKey,
-    publicKey: partnerPubKey,
+    publicKey:  partnerPubKey,
   });
 
   const derivedKey = crypto.hkdfSync('sha256', sharedSecret, '', 'vault-key-wrap', 32);
 
-  const iv = crypto.randomBytes(12);
+  const iv     = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', derivedKey, iv);
-  
+
   const encryptedVaultKey = Buffer.concat([cipher.update(vaultKey), cipher.final()]);
-  const authTag = cipher.getAuthTag();
+  const authTag           = cipher.getAuthTag();
 
   const envelope = Buffer.concat([iv, authTag, encryptedVaultKey]);
 
   return {
-    ephemeralPublicKey: ephemeralPubKey.toString('hex'),
-    encryptedKey: envelope.toString('hex'),
+    ephemeralPublicKey: ephemeralPubKey.export({ type: 'spki', format: 'der' }).toString('hex'),
+    encryptedKey:       envelope.toString('hex'),
   };
 };
 
@@ -94,13 +94,13 @@ export const encryptVaultKey = (vaultKeyHex, partnerPublicKeyHex) => {
  * 4. Decrypt Vault Key (Handshake)
  */
 export const decryptVaultKey = (encryptedEnvelopeHex, ephemeralPublicKeyHex, myPrivateKeyHex) => {
-  const envelope = Buffer.from(encryptedEnvelopeHex, 'hex');
-  const ephemeralPubKey = Buffer.from(ephemeralPublicKeyHex, 'hex');
-  const myPrivKey = Buffer.from(myPrivateKeyHex, 'hex');
+  const envelope        = Buffer.from(encryptedEnvelopeHex, 'hex');
+  const ephemeralPubKey = crypto.createPublicKey({ key: Buffer.from(ephemeralPublicKeyHex, 'hex'), format: 'der', type: 'spki' });
+  const myPrivKey       = crypto.createPrivateKey({ key: Buffer.from(myPrivateKeyHex, 'hex'),       format: 'der', type: 'pkcs8' });
 
   const sharedSecret = crypto.diffieHellman({
     privateKey: myPrivKey,
-    publicKey: ephemeralPubKey,
+    publicKey:  ephemeralPubKey,
   });
 
   const derivedKey = crypto.hkdfSync('sha256', sharedSecret, '', 'vault-key-wrap', 32);
@@ -124,7 +124,7 @@ export const encryptMessage = (plaintext, vaultKeyHex, counter, aadObj = {}) => 
   const iv = crypto.randomBytes(12);
 
   // AAD Binding: Tie the message to its context (Vault, Sender, Counter)
-  const aad = Buffer.from(JSON.stringify({ ...aadObj, c: counter }));
+  const aad = Buffer.from(JSON.stringify({ ...aadObj.metadata, c: counter }));
 
   // HKDF: Derive a unique key for THIS message using the counter as part of the salt/info
   const messageKey = crypto.hkdfSync(
@@ -155,8 +155,10 @@ export const encryptMessage = (plaintext, vaultKeyHex, counter, aadObj = {}) => 
 
   const envelope = Buffer.concat([iv, tag, ciphertext]);
 
-  // Sign the entire envelope + metadata for identity proof
-  const signature = signMessage(envelope.toString('hex') + JSON.stringify(aadObj), aadObj.signingPrivateKey);
+  // Sign the envelope + metadata for identity proof (only if signing key is available)
+  const signature = aadObj.signingPrivateKey
+    ? signMessage(envelope.toString('hex') + JSON.stringify(aadObj.metadata), aadObj.signingPrivateKey)
+    : null;
 
   return {
     blob: envelope.toString('hex'),
@@ -195,7 +197,7 @@ export const decryptMessage = (envelopeHex, vaultKeyHex, lastSeenCounter, aadObj
     32
   );
 
-  const aad = Buffer.from(JSON.stringify(aadObj.metadata || {}));
+  const aad = Buffer.from(JSON.stringify({ ...aadObj.metadata, c: counter }));
 
   const decipher = crypto.createDecipheriv('aes-256-gcm', messageKey, iv);
   decipher.setAAD(aad); 
