@@ -9,11 +9,13 @@ import {
 import { router } from 'expo-router';
 import apiClient from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { encryptVaultKey, generateIdentityKeyPair } from '../utils/crypto';
+import crypto from 'react-native-quick-crypto';
 
 const CODE_LENGTH = 8;
 
 export default function JoinVaultScreen() {
-  const { setVaultId, setVaultStatus } = useAuth();
+  const { setVaultId, setVaultStatus, identityKey, deviceId } = useAuth();
   const [chars, setChars]   = useState(Array(CODE_LENGTH).fill(''));
   const [loading, setLoading] = useState(false);
   const inputs = useRef([]);
@@ -43,15 +45,67 @@ export default function JoinVaultScreen() {
     setLoading(true);
     try {
       const res = await apiClient.post('/api/vault/join', { invite_code: code });
-      setVaultId(res.data.vault_id);
+      const vaultId = res.data.vault_id;
+      const partnerId = res.data.partner_id;
+
+      // --- E2EE HANDSHAKE BEGIN ---
+      console.log('[E2EE] 🤝 Starting Security Handshake...');
+      
+      // 1. Generate random 32-byte Vault Key
+      const newVaultKey = crypto.randomBytes(32).toString('hex');
+
+      // 2. Fetch Partner's Devices (with verification status)
+      console.log('[E2EE] 🔍 Fetching partner devices...');
+      const devicesRes = await apiClient.get('/api/devices/partner');
+      const partnerDevices = devicesRes.data.devices || [];
+
+      const verifiedDevices = partnerDevices.filter(d => d.is_verified);
+      const unverifiedCount = partnerDevices.length - verifiedDevices.length;
+
+      // 3. Encrypt for each VERIFIED partner device
+      const keyUploads = [];
+      for (const dev of verifiedDevices) {
+        const encrypted = encryptVaultKey(newVaultKey, dev.identity_public_key);
+        keyUploads.push({
+          vault_id: vaultId,
+          target_user_id: partnerId,
+          target_device_id: dev.id,
+          encrypted_key: encrypted.encryptedKey,
+          ephemeral_public_key: encrypted.ephemeralPublicKey,
+          key_version: 1
+        });
+      }
+
+      // 4. Encrypt for MY OWN device (Partner B)
+      const myPublicHex = crypto.createECDH('x25519').setPrivateKey(Buffer.from(identityKey, 'hex')).getPublicKey('hex');
+      const myEncrypted = encryptVaultKey(newVaultKey, myPublicHex);
+      keyUploads.push({
+        vault_id: vaultId,
+        target_user_id: null,
+        target_device_id: deviceId,
+        encrypted_key: myEncrypted.encryptedKey,
+        ephemeral_public_key: myEncrypted.ephemeralPublicKey,
+        key_version: 1
+      });
+
+      if (unverifiedCount > 0) {
+        console.warn(`[E2EE] ⚠️ Skipping ${unverifiedCount} unverified partner devices.`);
+      }
+
+      // 5. Upload all encrypted keys
+      await Promise.all(keyUploads.map(k => apiClient.post('/api/keys/vault', k)));
+      console.log('[E2EE] ✅ Security Handshake Successful!');
+
+      setVaultId(vaultId);
       setVaultStatus('active');
       router.replace('/connected');
     } catch (err) {
+      console.error('[E2EE] ❌ Handshake failed:', err);
       const status = err?.response?.status;
       if (status === 429) {
         Alert.alert('Too many attempts', 'Please wait 15 minutes and try again.');
       } else {
-        Alert.alert('Invalid Code', 'That code is wrong, expired, or already used.');
+        Alert.alert('Join Failed', 'Could not establish a secure connection. Please try again.');
       }
       setChars(Array(CODE_LENGTH).fill(''));
       inputs.current[0]?.focus();

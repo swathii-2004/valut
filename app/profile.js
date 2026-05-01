@@ -215,6 +215,23 @@ export default function ProfileScreen() {
           <Text style={s.vaultSub}>Your messages are end-to-end encrypted with AES-256-GCM. Only you and your partner can read them.</Text>
         </View>
 
+        {/* Security & Devices Link */}
+        <TouchableOpacity 
+          style={[s.menuItem, { backgroundColor: C.surface, borderColor: C.border }]} 
+          onPress={() => router.push('/settings/devices')}
+        >
+          <View style={s.menuItemLeft}>
+            <View style={[s.menuIcon, { backgroundColor: C.accentSoft }]}>
+              <Ionicons name="phone-portrait" size={20} color={C.accent} />
+            </View>
+            <View>
+              <Text style={[s.menuItemTitle, { color: C.textPrimary }]}>Security & Devices</Text>
+              <Text style={[s.menuItemSub, { color: C.textSec }]}>Manage and verify trusted devices</Text>
+            </View>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color={C.textSec} />
+        </TouchableOpacity>
+
       </Animated.ScrollView>
     </SafeAreaView>
   );
@@ -281,4 +298,12 @@ const s = StyleSheet.create({
   },
   vaultTitle: { color: '#fff', fontWeight: '800', fontSize: 18, marginBottom: 8 },
   vaultSub: { color: 'rgba(255,255,255,0.85)', fontSize: 13, textAlign: 'center', lineHeight: 20 },
+  menuItem: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    padding: 16, borderRadius: 20, borderWidth: 1,
+  },
+  menuItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  menuIcon: { width: 40, height: 40, borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
+  menuItemTitle: { fontSize: 16, fontWeight: '700' },
+  menuItemSub: { fontSize: 12, marginTop: 2 },
 });

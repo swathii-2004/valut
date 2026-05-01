@@ -24,6 +24,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { EMOJI_CATEGORIES, searchEmojis } from '../data/emojis';
 import apiClient from '../api/client';
 import { setIsChatActive } from '../utils/notificationState';
+import { decryptVaultKey, encryptMessage, decryptMessage } from '../utils/crypto';
 
 const BASE_URL = 'https://couplvault.online';
 const TENOR_KEY = 'AIzaSyC0oPH0y72GDnDqHR0cJUFLBvpCi4n2XWw'; // Tenor API key
@@ -168,6 +169,43 @@ const MessageBubble = React.memo(({ msg, myId, token, C, onLongPress, onImagePre
   // (expo-image on Android ignores custom Authorization headers for image sources)
   const mediaUrl = (fileId) => `${BASE_URL}/api/files/${fileId}/view?token=${token}`;
 
+  const [decryptedUri, setDecryptedUri] = useState(null);
+  const { vaultKeyMap } = useAuth(); // We'll need the keys here too
+
+  useEffect(() => {
+    if (msg.type === 'image' && msg.is_e2ee && msg.file_id && !decryptedUri) {
+      decryptImage();
+    }
+  }, [msg.file_id]);
+
+  const decryptImage = async () => {
+    try {
+      const vKey = vaultKeyMap[msg.key_version || 1];
+      if (!vKey) return;
+
+      const url = mediaUrl(msg.file_id);
+      const res = await fetch(url);
+      const iv = res.headers.get('X-IV');
+      const tag = res.headers.get('X-Auth-Tag');
+      const encryptedBlob = await res.arrayBuffer();
+
+      const { decryptMessage } = require('../utils/crypto');
+      // AAD: Must match what was used during encryption (Vault ID + Message Sender ID + Counter 0)
+      const aad = { v: authVaultId, s: msg.sender_id, c: 0 };
+      
+      const envelope = Buffer.concat([
+        Buffer.from(iv, 'hex'),
+        Buffer.from(tag, 'hex'),
+        Buffer.from(encryptedBlob)
+      ]);
+      
+      const decrypted = decryptMessage(envelope.toString('hex'), vKey, -1, aad); // Counter -1 skips replay check
+      setDecryptedUri(`data:image/jpeg;base64,${Buffer.from(decrypted.text, 'hex').toString('base64')}`);
+    } catch (e) {
+      console.warn('[E2EE] ❌ Image decryption failed:', e.message);
+    }
+  };
+
   const isMine = msg.sender_id === myId;
   const reactions = msg.reactions?.filter(r => r.emoji) || [];
 
@@ -309,11 +347,16 @@ const MessageBubble = React.memo(({ msg, myId, token, C, onLongPress, onImagePre
           {msg.type === 'image' && msg.file_id && !msg.view_once && (
             <Pressable onPress={() => onImagePress?.(msg)} onLongPress={() => handleLongPress(msg)}>
               <Image
-                source={{ uri: mediaUrl(msg.file_id) }}
+                source={{ uri: msg.is_e2ee ? decryptedUri : mediaUrl(msg.file_id) }}
                 style={bs.imageThumb}
                 contentFit="cover"
                 cachePolicy="none"
               />
+              {msg.is_e2ee && !decryptedUri && (
+                <View style={[StyleSheet.absoluteFill, { justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.1)' }]}>
+                   <ActivityIndicator size="small" color={C.accent} />
+                </View>
+              )}
             </Pressable>
           )}
           {msg.type === 'video' && !msg.view_once && (
@@ -548,6 +591,12 @@ export default function ChatScreen() {
   const [partnerTyping, setPartnerTyping] = useState(false);
   const [showConfetti, setShowConfetti] = useState(false);
 
+  // E2EE State
+  const { identityKey, signingKey, deviceId, vaultId: authVaultId, lastCounter, updateLastCounter } = useAuth();
+  const [vaultKeyMap, setVaultKeyMap] = useState({}); // { version: hexKey }
+  const [activeKeyVersion, setActiveKeyVersion] = useState(null);
+  const [partnerSigningKey, setPartnerSigningKey] = useState(null);
+
   const triggerConfetti = useCallback(() => {
     setShowConfetti(true);
     setTimeout(() => setShowConfetti(false), 3500);
@@ -560,6 +609,7 @@ export default function ChatScreen() {
   const [showActions, setShowActions] = useState(false);
   const [showAttach, setShowAttach] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [unverifiedPartnerDevices, setUnverifiedPartnerDevices] = useState([]);
 
   // ── Doodle Pad State ───────────────────────────────────
   const [showDoodle, setShowDoodle] = useState(false);
@@ -661,6 +711,45 @@ export default function ChatScreen() {
   const typingTimer = useRef(null);
   const typingRef = useRef(false);
 
+  // --- E2EE DECRYPTION HELPER ---
+  const processIncomingMessages = useCallback((msgs) => {
+    let maxCounter = lastCounter;
+    
+    const processed = msgs.map(m => {
+      if (!m.is_e2ee || m.is_deleted) return m;
+      
+      const vKey = vaultKeyMap[m.key_version || 1];
+      if (!vKey) return { ...m, content: '[Encrypted - Missing Key]' };
+
+      try {
+        const decoded = decryptMessage(m.content, vKey, maxCounter, {
+          c: m.counter || 0,
+          metadata: { v: authVaultId, s: m.sender_id },
+          signature: m.signature,
+          partnerSigningPublicKey: m.sender_id === myId ? null : partnerSigningKey
+        });
+        if (decoded.counter > maxCounter) maxCounter = decoded.counter;
+        return {
+          ...m,
+          content: decoded.text,
+          decrypted: true,
+          counter: decoded.counter,
+          server_ts: decoded.timestamp
+        };
+      } catch (err) {
+        console.warn(`[SECURITY] ❌ Cryptographic failure for msg ${m.id}:`, err.message);
+        let errorLabel = '[Decryption Failed]';
+        if (err.message.includes('IDENTITY')) errorLabel = '[⚠️ Identity Proof Failed]';
+        if (err.message.includes('REPLAY')) errorLabel = '[⚠️ Replay Attack Blocked]';
+        
+        return { ...m, content: errorLabel, securityError: true };
+      }
+    });
+
+    if (maxCounter > lastCounter) updateLastCounter(maxCounter);
+    return processed;
+  }, [vaultKeyMap, lastCounter, updateLastCounter, authVaultId]);
+
   useEffect(() => {
     if (!accessToken) return;
     try {
@@ -672,6 +761,12 @@ export default function ChatScreen() {
   useEffect(() => {
     if (!myId) return;
     apiClient.get('/api/profile/partner').then(r => setPartnerProfile(r.data)).catch(() => { });
+    
+    // Check for unverified partner devices
+    apiClient.get('/api/devices/partner').then(r => {
+      const unverified = r.data.devices.filter(d => !d.is_verified);
+      setUnverifiedPartnerDevices(unverified);
+    }).catch(() => { });
   }, [myId]);
 
   const fetchMessages = useCallback(async (before = null) => {
@@ -681,11 +776,18 @@ export default function ChatScreen() {
       const msgs = res.data.messages || [];
       setHasMore(res.data.has_more);
       if (res.data.partner_id) setPartnerId(res.data.partner_id);
-      if (before) setMessages(prev => [...msgs, ...prev]);
-      else setMessages(msgs);
+      
+      // If there are any unread messages from the partner, mark them all as read!
+      const hasUnread = msgs.some(m => m.sender_id !== myId && !m.is_read);
+      if (hasUnread) {
+        apiClient.put('/api/messages/read/all').catch(() => {});
+      }
+
+      if (before) setMessages(prev => [...processIncomingMessages(msgs), ...prev]);
+      else setMessages(processIncomingMessages(msgs));
     } catch { Alert.alert('Error', 'Failed to load messages'); }
     finally { setLoading(false); setLoadingMore(false); }
-  }, []);
+  }, [myId]);
 
   useEffect(() => {
     let appState = AppState.currentState;
@@ -700,6 +802,47 @@ export default function ChatScreen() {
 
   useEffect(() => { if (myId) fetchMessages(); }, [myId]);
 
+  // --- E2EE KEY BOOTSTRAP ---
+  useEffect(() => {
+    if (!authVaultId || !identityKey) return;
+    
+    const bootstrapVaultKeys = async () => {
+      try {
+        console.log('[E2EE] 🔑 Fetching Vault Keys...');
+        const res = await apiClient.get(`/api/keys/vault/${authVaultId}`);
+        const keys = res.data.keys || [];
+        
+        const map = {};
+        let maxVer = 0;
+
+        for (const k of keys) {
+          try {
+            const plain = decryptVaultKey(k.encrypted_key, k.ephemeral_public_key, identityKey);
+            map[k.key_version] = plain;
+            if (k.key_version > maxVer) maxVer = k.key_version;
+          } catch (e) {
+            console.warn(`[E2EE] ⚠️ Failed to decrypt key v${k.key_version}:`, e.message);
+          }
+        }
+
+        setVaultKeyMap(map);
+        setActiveKeyVersion(maxVer);
+        console.log('[E2EE] ✅ Vault Keys Ready. Active Version:', maxVer);
+      } catch (err) {
+        console.error('[E2EE] ❌ Failed to load vault keys:', err.message);
+      }
+    };
+
+    bootstrapVaultKeys();
+
+    // Fetch Partner Signing Key
+    if (partnerId) {
+      apiClient.get(`/api/keys/identity/${partnerId}`).then(r => {
+        setPartnerSigningKey(r.data.signing_public_key);
+      }).catch(() => {});
+    }
+  }, [authVaultId, identityKey, partnerId]);
+
   // Mark chat screen as active so foreground push notifications are suppressed
   useEffect(() => {
     setIsChatActive(true);
@@ -713,7 +856,8 @@ export default function ChatScreen() {
     socketRef.current = socket;
     socket.on('connect', () => { if (partnerId) socket.emit('join_room', { partnerId }); });
     socket.on('new_message', (msg) => {
-      setMessages(prev => prev.find(m => m.id === msg.id) ? prev : [...prev, msg]);
+      const processed = processIncomingMessages([msg])[0];
+      setMessages(prev => prev.find(m => m.id === processed.id) ? prev : [...prev, processed]);
       if (msg.sender_id !== myId) {
         apiClient.put(`/api/messages/${msg.id}/read`).catch(() => { });
         // Tell sender their message was delivered
@@ -786,18 +930,79 @@ export default function ChatScreen() {
     setText(''); setReplyTo(null);
     typingRef.current = false;
     socketRef.current?.emit('stop_typing');
+
+    let payload = trimmed;
+    let isE2EE = false;
+    let currentCounter = lastCounter + 1;
+
+    const vKey = vaultKeyMap[activeKeyVersion];
+    let signature = null;
+    if (vKey) {
+      try {
+        console.log(`[E2EE] 🔐 Encrypting & Signing (Counter: ${currentCounter})...`);
+        const aad = { 
+          metadata: { v: authVaultId, s: myId },
+          signingPrivateKey: signingKey
+        };
+        const encrypted = encryptMessage(trimmed, vKey, currentCounter, aad);
+        payload = encrypted.blob;
+        signature = encrypted.signature;
+        isE2EE = true;
+        updateLastCounter(currentCounter);
+
+        // AUTO-ROTATION: Every 100 messages, trigger a key rotation for Forward Secrecy
+        if (currentCounter % 100 === 0) {
+          console.log('[SECURITY] 🔄 Auto-rotating Vault Key (100 messages reached)...');
+          (async () => {
+            try {
+              // Fetch latest trusted devices (Partner + Me)
+              const [resMy, resPartner] = await Promise.all([
+                apiClient.get('/api/devices'),
+                apiClient.get('/api/devices/partner')
+              ]);
+              const allTrusted = [
+                ...resMy.data.devices,
+                ...resPartner.data.devices.filter(d => d.is_verified)
+              ];
+
+              const nextVer = activeKeyVersion + 1;
+              const rotation = await rotateVaultKey(authVaultId, identityKey, allTrusted, nextVer);
+              
+              // Upload new keys
+              await Promise.all(rotation.payloads.map(p => apiClient.post('/api/keys/vault', p)));
+              console.log('[SECURITY] ✅ Auto-rotation complete.');
+            } catch (err) {
+              console.warn('[SECURITY] ⚠️ Auto-rotation failed:', err.message);
+            }
+          })();
+        }
+      } catch (err) {
+        console.warn('[E2EE] ⚠️ Encryption failed:', err.message);
+      }
+    }
+
     // Optimistic append: show message immediately before server responds
     const optimisticId = `opt_${Date.now()}`;
     const optimisticMsg = {
       id: optimisticId, content: trimmed, type: 'text',
       sender_id: myId, created_at: new Date().toISOString(),
       is_read: false, is_deleted: false, reactions: [],
+      is_e2ee: isE2EE,
       reply_to: savedReplyTo ? { id: savedReplyTo.id, content: savedReplyTo.content, type: savedReplyTo.type } : null,
     };
     setMessages(prev => [...prev, optimisticMsg]);
+    
     try {
-      const res = await apiClient.post('/api/messages', { content: trimmed, reply_to_id: savedReplyTo?.id || null });
-      const newMsg = res.data.message;
+      const res = await apiClient.post('/api/messages', { 
+        content: payload, 
+        signature: signature,
+        counter: currentCounter,
+        reply_to_id: savedReplyTo?.id || null,
+        is_e2ee: isE2EE,
+        key_version: isE2EE ? activeKeyVersion : null
+      });
+      const rawNewMsg = res.data.message;
+      const newMsg = isE2EE ? processIncomingMessages([rawNewMsg])[0] : rawNewMsg;
       // Replace optimistic with real message
       if (newMsg) {
         setMessages(prev => prev.map(m => m.id === optimisticId ? newMsg : m).filter((m, i, arr) => m.id !== newMsg.id || arr.indexOf(m) === i));
@@ -1144,6 +1349,19 @@ export default function ChatScreen() {
   return (
     <KeyboardAvoidingView style={[s.root, { backgroundColor: C.bg }]} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}>
       <ConfettiOverlay active={showConfetti} />
+      
+      {unverifiedPartnerDevices.length > 0 && (
+        <TouchableOpacity 
+          style={[s.trustBanner, { backgroundColor: C.accent }]} 
+          onPress={() => router.push('/settings/devices')}
+        >
+          <Ionicons name="warning" size={16} color="#000" />
+          <Text style={s.trustBannerText}>
+            Partner has {unverifiedPartnerDevices.length} unverified device(s). Tap to verify.
+          </Text>
+          <Ionicons name="chevron-forward" size={14} color="#000" />
+        </TouchableOpacity>
+      )}
 
       {/* ── Header ── */}
       <View style={[s.header, { backgroundColor: C.header, borderBottomColor: C.border }]}>
@@ -2058,4 +2276,12 @@ const s = StyleSheet.create({
     borderRadius: 16, marginTop: 16,
   },
   viewModeBtn: { flex: 1, paddingVertical: 10, borderRadius: 20, alignItems: 'center', borderWidth: 1 },
+  trustBanner: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 8, paddingHorizontal: 16,
+    gap: 8,
+  },
+  trustBannerText: {
+    color: '#000', fontSize: 12, fontWeight: '700',
+  },
 });

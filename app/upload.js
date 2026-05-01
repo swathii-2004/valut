@@ -7,10 +7,21 @@ import { router } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import apiClient from '../api/client';
+import { useAuth } from '../context/AuthContext';
+import { encryptMessage } from '../utils/crypto';
+import * as FileSystem from 'expo-file-system';
+import { Buffer } from 'buffer';
+import crypto from 'react-native-quick-crypto';
 
 export default function UploadScreen() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const { vaultId, identityKey, accessToken } = useAuth();
+  
+  const myId = accessToken ? JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64').toString()).sub : null;
+  // We'll fetch the vault key from a context or state in a real app,
+  // but for now, we'll fetch it from the server and decrypt it here or use a helper.
+  // Actually, I'll add a helper to useAuth or just fetch it here.
 
   const pickDocument = async () => {
     try {
@@ -58,12 +69,44 @@ export default function UploadScreen() {
     }
     setUploading(true);
     try {
+      // 1. Fetch & Decrypt Vault Key (if not already in memory)
+      const keysRes = await apiClient.get(`/api/keys/vault/${vaultId}`);
+      const myKeyObj = keysRes.data.keys.find(k => k.key_version === 1); // Simplification
+      const { decryptVaultKey } = require('../utils/crypto');
+      const vKey = decryptVaultKey(myKeyObj.encrypted_key, myKeyObj.ephemeral_public_key, identityKey);
+
+      // 2. Read File and Encrypt with AAD
+      console.log('[E2EE] 🔒 Encrypting file with AAD...');
+      const fileBase64 = await FileSystem.readAsStringAsync(selectedFile.uri, { encoding: 'base64' });
+      const fileBuffer = Buffer.from(fileBase64, 'base64');
+      
+      const aad = { v: vaultId, s: myId }; // Use real UUID for consistency
+      const fileEnc = encryptMessage(fileBuffer.toString('hex'), vKey, 0, aad); // Files use counter 0
+      
+      // Extract IV (12 bytes), Tag (16 bytes), and Ciphertext from the envelope hex
+      const envelopeBuf = Buffer.from(fileEnc.blob, 'hex');
+      const iv = envelopeBuf.subarray(0, 12).toString('hex');
+      const tag = envelopeBuf.subarray(12, 28).toString('hex');
+      
+      const nameEnc = encryptMessage(selectedFile.name, vKey, 0, aad);
+      const nameEnv = Buffer.from(nameEnc.blob, 'hex');
+      const nameIv = nameEnv.subarray(0, 12).toString('hex');
+      const nameTag = nameEnv.subarray(12, 28).toString('hex');
+      const nameCipher = nameEnv.subarray(28).toString('hex');
+
+      // 3. Prepare Multipart Upload
       const formData = new FormData();
       formData.append('file', {
-        uri: selectedFile.uri,
-        name: selectedFile.name || 'upload',
-        type: selectedFile.mimeType || 'application/octet-stream',
+        uri: `data:application/octet-stream;base64,${envelopeBuf.subarray(28).toString('base64')}`,
+        name: 'encrypted_file',
+        type: 'application/octet-stream',
       });
+      formData.append('is_e2ee', 'true');
+      formData.append('iv', iv);
+      formData.append('auth_tag', tag);
+      formData.append('encrypted_name', nameCipher);
+      formData.append('name_iv', nameIv);
+      formData.append('name_auth_tag', nameTag);
 
       await apiClient.post('/api/files/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },

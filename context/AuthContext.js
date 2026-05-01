@@ -1,5 +1,8 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import * as SecureStore from 'expo-secure-store';
+import { generateIdentityKeyPair } from '../utils/crypto';
+import axios from 'axios';
+import Constants from 'expo-constants';
 
 const AuthContext = createContext(null);
 
@@ -7,24 +10,46 @@ const ACCESS_TOKEN_KEY  = 'cv_access_token';
 const REFRESH_TOKEN_KEY = 'cv_refresh_token';
 const VAULT_ID_KEY      = 'cv_vault_id';
 const VAULT_STATUS_KEY  = 'cv_vault_status';
+const IDENTITY_PRIV_KEY = 'cv_identity_priv_key';
+const DEVICE_ID_KEY     = 'cv_device_id';
+const LAST_COUNTER_KEY  = 'cv_last_counter';
+const SIGNING_PRIV_KEY  = 'cv_signing_priv_key';
+
+const API_URL = Constants.expoConfig.extra?.apiUrl || 'http://localhost:3000';
 
 export function AuthProvider({ children }) {
   const [accessToken,  setAccessToken]  = useState(null);
   const [vaultId,      setVaultIdState] = useState(null);
   const [vaultStatus,  setVaultStatusState] = useState(null);
+  const [identityKey,   setIdentityKey]  = useState(null); // Private Key (Encryption)
+  const [signingKey,    setSigningKey]   = useState(null); // Private Key (Signing)
+  const [deviceId,      setDeviceId]     = useState(null);
+  const [lastCounter,   setLastCounterState] = useState(0);
   const [loading,      setLoading]      = useState(true);
 
   useEffect(() => {
     (async () => {
-      try {
-        const [token, vid, vstatus] = await Promise.all([
+        const [token, vid, vstatus, privKey, did, cnt] = await Promise.all([
           SecureStore.getItemAsync(ACCESS_TOKEN_KEY),
           SecureStore.getItemAsync(VAULT_ID_KEY),
           SecureStore.getItemAsync(VAULT_STATUS_KEY),
+          SecureStore.getItemAsync(IDENTITY_PRIV_KEY),
+          SecureStore.getItemAsync(SIGNING_PRIV_KEY),
+          SecureStore.getItemAsync(DEVICE_ID_KEY),
+          SecureStore.getItemAsync(LAST_COUNTER_KEY),
         ]);
         if (token)   setAccessToken(token);
         if (vid)     setVaultIdState(vid);
         if (vstatus) setVaultStatusState(vstatus);
+        if (privKey) setIdentityKey(privKey);
+        if (signKey) setSigningKey(signKey);
+        if (did)     setDeviceId(did);
+        if (cnt)     setLastCounterState(parseInt(cnt, 10));
+
+        // If logged in but no identity, bootstrap it
+        if (token && !privKey) {
+          bootstrapIdentity(token);
+        }
       } catch (e) {
         console.warn('Failed to load auth state:', e);
       } finally {
@@ -39,6 +64,53 @@ export function AuthProvider({ children }) {
     await SecureStore.setItemAsync(ACCESS_TOKEN_KEY,  accessTok);
     await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, refreshTok);
     setAccessToken(accessTok);
+    
+    // Bootstrap E2EE identity after login
+    await bootstrapIdentity(accessTok);
+  };
+
+  const bootstrapIdentity = async (token) => {
+    try {
+      let privKey  = await SecureStore.getItemAsync(IDENTITY_PRIV_KEY);
+      let signKey  = await SecureStore.getItemAsync(SIGNING_PRIV_KEY);
+      let did      = await SecureStore.getItemAsync(DEVICE_ID_KEY);
+
+      // If missing ANY part of the identity, re-bootstrap (or fill gaps)
+      if (!privKey || !signKey) {
+        console.log('[E2EE] 🔑 Identity incomplete. Bootstrapping security keys...');
+        const keys = generateIdentityKeyPair();
+        
+        // Use existing privKey if we have it, otherwise take the new one
+        const finalPrivKey = privKey || keys.privateKey;
+        const finalSignKey = signKey || keys.signingPrivateKey;
+
+        // Register/Update device with server
+        const resp = await axios.post(`${API_URL}/api/devices`, {
+          identity_public_key: keys.publicKey, // This will upsert based on the server logic
+          signing_public_key: keys.signingPublicKey,
+          device_name: Constants.deviceName || 'Mobile Device'
+        }, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
+        did = resp.data.id;
+        privKey = finalPrivKey;
+        signKey = finalSignKey;
+
+        await Promise.all([
+          SecureStore.setItemAsync(IDENTITY_PRIV_KEY, privKey),
+          SecureStore.setItemAsync(SIGNING_PRIV_KEY, signKey),
+          SecureStore.setItemAsync(DEVICE_ID_KEY, did)
+        ]);
+      }
+
+      setIdentityKey(privKey);
+      setSigningKey(signKey);
+      setDeviceId(did);
+      console.log('[E2EE] ✅ Zero-Trust Identity Active:', did);
+    } catch (err) {
+      console.error('[E2EE] ❌ Identity bootstrap failed:', err.message);
+    }
   };
 
   const logout = async () => {
@@ -47,10 +119,25 @@ export function AuthProvider({ children }) {
       SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY),
       SecureStore.deleteItemAsync(VAULT_ID_KEY),
       SecureStore.deleteItemAsync(VAULT_STATUS_KEY),
+      SecureStore.deleteItemAsync(IDENTITY_PRIV_KEY),
+      SecureStore.deleteItemAsync(SIGNING_PRIV_KEY),
+      SecureStore.deleteItemAsync(DEVICE_ID_KEY),
+      SecureStore.deleteItemAsync(LAST_COUNTER_KEY),
     ]);
     setAccessToken(null);
     setVaultIdState(null);
     setVaultStatusState(null);
+    setIdentityKey(null);
+    setSigningKey(null);
+    setDeviceId(null);
+    setLastCounterState(0);
+  };
+
+  const updateLastCounter = async (newVal) => {
+    if (newVal > lastCounter) {
+      await SecureStore.setItemAsync(LAST_COUNTER_KEY, newVal.toString());
+      setLastCounterState(newVal);
+    }
   };
 
   const getRefreshToken = async () => SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
@@ -76,6 +163,8 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider value={{
       accessToken, loading,
       vaultId, vaultStatus,
+      identityKey, signingKey, deviceId,
+      lastCounter, updateLastCounter,
       login, logout,
       getRefreshToken, updateAccessToken,
       setVaultId, setVaultStatus,
