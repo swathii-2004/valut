@@ -61,6 +61,32 @@ async function getPartnerInVault(myId, vaultId) {
 
 // ── Helper — decrypt a message row ──────────────────────────────────────────
 function decryptMessage(row, vaultKey, fallbackKeyVersion) {
+    // If it is an E2EE message, the server CANNOT decrypt it.
+    // Return the raw encrypted fields so the client can decrypt it.
+    if (row.is_e2ee) {
+        return {
+            id          : row.id,
+            sender_id   : row.sender_id,
+            receiver_id : row.receiver_id,
+            type        : row.type,
+            content     : row.content,       // This is the ciphertext hex
+            content_iv  : row.content_iv,
+            content_tag : row.content_tag,
+            is_e2ee     : true,
+            file_id     : row.file_id,
+            reply_to_id : row.reply_to_id     || null,
+            view_once   : row.view_once  || false,
+            view_max    : row.view_max   || 1,
+            view_count  : row.view_count || 0,
+            is_deleted  : row.is_deleted,
+            is_read     : row.is_read,
+            read_at     : row.read_at,
+            created_at  : row.created_at,
+            is_starred  : row.is_starred || false,
+            signature   : row.signature  || null,
+        };
+    }
+
     // Build a minimal req-like object so decryptData can branch correctly
     const fakeReq = vaultKey ? { vaultKey } : null;
 
@@ -95,13 +121,18 @@ function decryptMessage(row, vaultKey, fallbackKeyVersion) {
     if ((row.rt_type === 'text' || row.rt_type === 'gif')
         && row.rt_content && row.rt_content_iv && row.rt_content_tag) {
         try {
-            replyToContent = decryptData(
-                Buffer.from(row.rt_content, 'hex'),
-                row.rt_content_iv,
-                row.rt_content_tag,
-                fakeReq,
-                row.rt_key_version || fallbackKeyVersion
-            ).toString('utf8');
+            // Only try to decrypt reply_to if it's NOT E2EE
+            if (!row.rt_is_e2ee) {
+                replyToContent = decryptData(
+                    Buffer.from(row.rt_content, 'hex'),
+                    row.rt_content_iv,
+                    row.rt_content_tag,
+                    fakeReq,
+                    row.rt_key_version || fallbackKeyVersion
+                ).toString('utf8');
+            } else {
+                replyToContent = '[Encrypted Message]';
+            }
         } catch { replyToContent = '[message]'; }
     }
 
@@ -111,6 +142,7 @@ function decryptMessage(row, vaultKey, fallbackKeyVersion) {
         receiver_id : row.receiver_id,
         type        : row.type,
         content,
+        is_e2ee     : false,
         file_id     : row.file_id,
         file_name   : fileName,
         file_size   : row.file_size_bytes || null,
@@ -122,6 +154,7 @@ function decryptMessage(row, vaultKey, fallbackKeyVersion) {
             content  : replyToContent,
             file_id  : row.rt_file_id || null,
             sender_id: row.rt_sender_id || null,
+            is_e2ee  : row.rt_is_e2ee || false,
         } : null,
         view_once  : row.view_once  || false,
         view_max   : row.view_max   || 1,
@@ -163,6 +196,7 @@ router.get('/', protect, async (req, res) => {
                 rt.content_iv  as rt_content_iv,
                 rt.content_tag as rt_content_tag,
                 rt.key_version as rt_key_version,
+                rt.is_e2ee     as rt_is_e2ee,
                 COALESCE(
                     json_agg(json_build_object('emoji', mr.emoji, 'user_id', mr.user_id))
                     FILTER (WHERE mr.id IS NOT NULL), '[]'
@@ -175,7 +209,7 @@ router.get('/', protect, async (req, res) => {
                AND m.is_deleted = FALSE
                AND m.created_at < $3
              GROUP BY m.id, f.mime_type, f.file_size_bytes, f.encrypted_name, f.name_iv, f.name_auth_tag, f.key_version,
-                      rt.type, rt.sender_id, rt.file_id, rt.content, rt.content_iv, rt.content_tag, rt.key_version
+                      rt.type, rt.sender_id, rt.file_id, rt.content, rt.content_iv, rt.content_tag, rt.key_version, rt.is_e2ee
              ORDER BY m.created_at DESC
              LIMIT $4`,
             [req.user.sub, vaultId, before, limit]
@@ -204,14 +238,26 @@ router.post('/', protect, async (req, res) => {
         const keyVersion = await getActiveKeyVersion();
         const partner    = await getPartnerInVault(myId, vaultId);
 
-        const enc = encryptData(Buffer.from(content.trim(), 'utf8'), req, keyVersion);
+        const isE2EE = !!(req.body.content_iv && req.body.content_tag);
+        let enc_content, enc_iv, enc_tag;
+
+        if (isE2EE) {
+            enc_content = content; // already ciphertext hex from client
+            enc_iv      = req.body.content_iv;
+            enc_tag     = req.body.content_tag;
+        } else {
+            const enc = encryptData(Buffer.from(content.trim(), 'utf8'), req, keyVersion);
+            enc_content = enc.ciphertext.toString('hex');
+            enc_iv      = enc.iv;
+            enc_tag     = enc.authTag;
+        }
 
         const result = await pool.query(
             `INSERT INTO messages
-               (vault_id, sender_id, receiver_id, type, content, content_iv, content_tag, key_version, reply_to_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               (vault_id, sender_id, receiver_id, type, content, content_iv, content_tag, key_version, reply_to_id, is_e2ee, signature)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              RETURNING *`,
-            [vaultId, myId, partner.id, type, enc.ciphertext.toString('hex'), enc.iv, enc.authTag, keyVersion, reply_to_id || null]
+            [vaultId, myId, partner.id, type, enc_content, enc_iv, enc_tag, keyVersion, reply_to_id || null, isE2EE, req.body.signature || null]
         );
 
         const msg = decryptMessage(result.rows[0], req.vaultKey, keyVersion);
@@ -220,21 +266,25 @@ router.post('/', protect, async (req, res) => {
         if (reply_to_id) {
             try {
                 const rtRes = await pool.query(
-                    `SELECT type, sender_id, file_id, content, content_iv, content_tag, key_version
-                     FROM messages WHERE id = $1`,
-                    [reply_to_id]
+                    `SELECT type, sender_id, file_id, content, content_iv, content_tag, key_version, is_e2ee
+                     FROM messages WHERE id = $1 AND vault_id = $2`,
+                    [reply_to_id, req.vaultId]
                 );
                 if (rtRes.rows.length) {
                     const rt = rtRes.rows[0];
                     let replyToContent = null;
                     if ((rt.type === 'text' || rt.type === 'gif') && rt.content) {
                         try {
-                            replyToContent = decryptData(
-                                Buffer.from(rt.content, 'hex'), rt.content_iv, rt.content_tag, req, rt.key_version
-                            ).toString('utf8');
+                            if (!rt.is_e2ee) {
+                                replyToContent = decryptData(
+                                    Buffer.from(rt.content, 'hex'), rt.content_iv, rt.content_tag, req, rt.key_version
+                                ).toString('utf8');
+                            } else {
+                                replyToContent = '[Encrypted Message]';
+                            }
                         } catch { replyToContent = '[message]'; }
                     }
-                    msg.reply_to = { id: reply_to_id, type: rt.type, content: replyToContent, file_id: rt.file_id, sender_id: rt.sender_id };
+                    msg.reply_to = { id: reply_to_id, type: rt.type, content: replyToContent, file_id: rt.file_id, sender_id: rt.sender_id, is_e2ee: rt.is_e2ee };
                 }
             } catch { /* non-fatal */ }
         }
@@ -247,9 +297,11 @@ router.post('/', protect, async (req, res) => {
         const senderRes  = await pool.query(`SELECT display_name FROM users WHERE id = $1`, [myId]);
         const senderName = senderRes.rows[0]?.display_name || req.user.email.split('@')[0];
         const previewTitle = type === 'thinking_of_you' ? '💭 Thinking of you' : senderName;
-        const previewBody  = type === 'thinking_of_you'
-            ? `${senderName} is thinking of you ❤️`
-            : getMessagePreview(type, content.trim());
+        const previewBody  = isE2EE 
+            ? '🔐 Encrypted message'
+            : (type === 'thinking_of_you' 
+                ? `${senderName} is thinking of you ❤️` 
+                : getMessagePreview(type, content.trim()));
         sendPushToUser(partner.id, previewTitle, previewBody, { type: 'message', messageId: msg.id });
 
         return res.status(201).json({ message: msg });
@@ -410,6 +462,32 @@ router.put('/:id/read', protect, async (req, res) => {
     } catch (err) {
         console.error('[MESSAGES] PUT /read error:', err.message);
         return res.status(500).json({ error: 'Failed to mark read' });
+    }
+});
+
+// ══════════════════════════════════════════════
+// PUT /api/messages/read/all — bulk read
+// ══════════════════════════════════════════════
+router.put('/read/all', protect, async (req, res) => {
+    try {
+        const myId = req.user.sub;
+
+        const result = await pool.query(
+            `UPDATE messages SET is_read = TRUE, read_at = NOW()
+             WHERE receiver_id = $1 AND vault_id = $2 AND is_read = FALSE
+             RETURNING id`,
+            [myId, req.vaultId]
+        );
+
+        const socketState = require('../socket');
+        for (const row of result.rows) {
+            socketState.getIo()?.to(`vault:${req.vaultId}`).emit('message_read_ack', { messageId: row.id, readBy: myId });
+        }
+
+        return res.json({ ok: true, count: result.rows.length });
+    } catch (err) {
+        console.error('[MESSAGES] PUT /read/all error:', err.message);
+        return res.status(500).json({ error: 'Failed to mark all read' });
     }
 });
 

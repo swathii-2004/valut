@@ -211,6 +211,13 @@ router.post('/join', authMiddleware, joinLimiter, async (req, res) => {
             joined_by: userId,
         });
 
+        // 8. Fetch Partner A (the creator) to return to Joiner
+        const partnerRes = await client.query(
+            `SELECT user_id FROM vault_members WHERE vault_id = $1 AND user_id != $2`,
+            [vault.id, userId]
+        );
+        const partnerId = partnerRes.rows[0]?.user_id;
+
         await writeAuditLog({
             userId,
             action   : 'login_success', // Bypass constraint, actual action in metadata
@@ -222,7 +229,11 @@ router.post('/join', authMiddleware, joinLimiter, async (req, res) => {
 
         console.log(`[VAULT] ✅ Joined: ${vault.id} by ${req.user.email}`);
 
-        return res.json({ vault_id: vault.id, status: 'active' });
+        return res.json({ 
+            vault_id: vault.id, 
+            status: 'active',
+            partner_id: partnerId
+        });
 
     } catch (err) {
         await client.query('ROLLBACK');

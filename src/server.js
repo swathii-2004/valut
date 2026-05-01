@@ -1,4 +1,6 @@
 require('dotenv').config();
+const dns = require('node:dns');
+dns.setDefaultResultOrder('ipv4first');
 
 // ── Startup guard: fail fast if MASTER_SECRET is missing ──
 if (!process.env.MASTER_SECRET) {
@@ -19,6 +21,8 @@ const messageRoutes = require('./routes/messages');
 const profileRoutes = require('./routes/profile');
 const datesRoutes   = require('./routes/dates');
 const vaultRoutes   = require('./routes/vault');
+const keysRoutes    = require('./routes/keys');
+const deviceRoutes  = require('./routes/devices');
 const adminRoutes   = require('./routes/admin');
 const socketState   = require('./socket');
 const pool          = require('./db/pool');
@@ -59,6 +63,8 @@ app.use('/api/messages', messageRoutes);
 app.use('/api/profile',  profileRoutes);
 app.use('/api/dates',    datesRoutes);
 app.use('/api/vault',    vaultRoutes);
+app.use('/api/keys',     keysRoutes);
+app.use('/api/devices',  deviceRoutes);
 app.use('/admin',        adminRoutes);
 
 // ── Health check ──

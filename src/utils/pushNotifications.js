@@ -41,8 +41,16 @@ async function sendPushToUser(userId, title, body, data = {}) {
         const chunks = expo.chunkPushNotifications(messages);
         for (const chunk of chunks) {
             try {
-                const receipts = await expo.sendPushNotificationsAsync(chunk);
-                console.log('[PUSH] Sent:', JSON.stringify(receipts));
+                // PATCH: Node 22 native fetch/undici times out on exp.host. Using axios instead.
+                const axios = require('axios');
+                const response = await axios.post('https://exp.host/--/api/v2/push/send', chunk, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'Accept-encoding': 'gzip, deflate',
+                        'Content-Type': 'application/json',
+                    }
+                });
+                console.log('[PUSH] Sent:', JSON.stringify(response.data.data));
             } catch (err) {
                 console.error('[PUSH] Chunk send error:', err.message);
             }

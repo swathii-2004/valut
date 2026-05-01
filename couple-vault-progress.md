@@ -20,8 +20,9 @@
    - [Security Settings](#step-7-security-settings)
 4. [File Reference](#file-reference)
 5. [Commands Reference](#commands-reference)
-6. [Completion Checklist](#completion-checklist)
-7. [Handoff Prompt](#handoff-prompt-for-next-session)
+6. [Phase 8 — Database Security & RLS](#phase-8--database-security--rls)
+7. [Completion Checklist](#completion-checklist)
+8. [Handoff Prompt](#handoff-prompt-for-next-session)
 
 ---
 
@@ -551,5 +552,75 @@ Terminal 2: & "C:\Program Files (x86)\cloudflared\cloudflared.exe" tunnel run co
 Terminal 3: cd C:\Users\91812\Desktop\valut\couple-vault-app && npx expo start --lan
 `
 
-*Phase 7 completed March 20, 2026.*
+---
 
+## 🛡️ Phase 8 — Database Security & Row Level Security (RLS)
+
+> Completed: May 1, 2026 — Phase 8 COMPLETE ✅
+
+### Security Architecture
+Implemented **Row Level Security (RLS)** at the PostgreSQL level to ensure strict isolation between different couples (vaults). This ensures that even if a query is missing a `WHERE vault_id = ...` clause, the database will automatically filter results based on the authenticated session's vault context.
+
+### Implementation Details
+
+#### 1. Migration `003_rls.sql`
+- Enabled RLS on `messages`, `files`, `message_reactions`, and `special_dates`.
+- Created policy `vault_isolation` for the `vault_app` role.
+- Logic: `USING (vault_id = NULLIF(current_setting('app.vault_id', true), '')::uuid)`.
+- This handles the "Defense in Depth" strategy, preventing cross-tenant data leakage.
+
+#### 2. Middleware Integration (`src/middleware/vault.js`)
+- Updated `verifyVaultMember` to inject the vault context into the DB session.
+- Code: `await pool.query('SELECT set_config($1, $2, false)', ['app.vault_id', vault_id])`.
+
+### Completion Checklist (Phase 8)
+- [x] Row Level Security enabled on all vault-scoped tables.
+- [x] Vault isolation policies created and tested.
+- [x] Middleware updated to set `app.vault_id` on every request.
+- [x] Verified zero-row leak on unauthenticated/misconfigured sessions.
+
+*Phase 8 completed May 1, 2026.*
+
+---
+
+## 🔐 Phase 9 — The Zero-Trust Upgrade (E2EE) — IN PROGRESS 🚀
+
+> Status: Research & Foundation Phase
+
+### Core Principles
+- **Zero-Knowledge**: Server never sees plaintext data or usable keys.
+- **Hybrid Encryption**: X25519 (Key Exchange) + AES-256-GCM (Content).
+- **Device-Side Security**: All encryption/decryption happens on the mobile device.
+
+### Refined Roadmap (Industry-Aligned)
+
+#### 🟦 Phase 9.1 — Foundation (Backend) ✅
+- [x] Add `identity_public_key` storage to `users` table.
+- [x] Implement public key fetch/upload endpoints.
+
+#### 🟦 Phase 9.2 — Vault Key Sharing (Handshake) ✅
+- [x] Client-side vault key generation.
+- [x] Encrypt vault key per user using partner's public key.
+- [x] Store `encrypted_vault_key` on server.
+
+#### 🟦 Phase 9.3 — E2EE Messages ✅
+- [x] Mobile App: Integrate encryption/decryption logic.
+- [x] Backend: Update messages table to store ciphertext and nonces.
+
+#### 🟦 Phase 9.4 — Key Verification (Anti-MITM)
+- [ ] Public key fingerprint display (SHA-256).
+- [ ] QR code comparison for out-of-band verification.
+
+#### 🟦 Phase 9.5 — Recovery System
+- [ ] 12-word seed phrase implementation (client-side).
+- [ ] Secure backup strategy for identity keys.
+
+#### 🟦 Phase 9.6 — Multi-device Support ✅
+- [x] Device registration flow.
+- [x] Re-encrypting vault keys for new authorized devices.
+
+#### 🟦 Phase 9.7 — E2EE Files
+- [ ] Large file chunk encryption.
+- [ ] Streaming decryption for media playback.
+
+*Roadmap formalized May 1, 2026.*

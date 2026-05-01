@@ -90,36 +90,47 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
         if (!keyRes.rows.length) return res.status(500).json({ error: 'No active encryption key' });
         const keyVersion = parseInt(keyRes.rows[0].version, 10);
 
-        // 4. Encrypt file and filename
-        const encryptedFile = encryptData(buffer, req.vaultKey, keyVersion);
-        const encryptedName = encryptData(Buffer.from(originalname, 'utf8'), req.vaultKey, keyVersion);
+        // 4. Handle E2EE vs Server-side Encryption
+        const isE2EE = req.body?.is_e2ee === 'true' || req.body?.is_e2ee === true;
+        let finalFileBytes, finalIv, finalTag, finalEncName, finalNameIv, finalNameTag;
+
+        if (isE2EE) {
+            finalFileBytes = buffer;
+            finalIv        = req.body.iv;
+            finalTag       = req.body.auth_tag;
+            finalEncName   = req.body.encrypted_name;
+            finalNameIv    = req.body.name_iv;
+            finalNameTag   = req.body.name_auth_tag;
+
+            if (!finalIv || !finalTag || !finalEncName) {
+                return res.status(400).json({ error: 'E2EE files require iv, auth_tag, and encrypted_name' });
+            }
+        } else {
+            const encryptedFile = encryptData(buffer, req.vaultKey, keyVersion);
+            const encryptedName = encryptData(Buffer.from(originalname, 'utf8'), req.vaultKey, keyVersion);
+            finalFileBytes = encryptedFile.ciphertext;
+            finalIv        = encryptedFile.iv;
+            finalTag       = encryptedFile.authTag;
+            finalEncName   = encryptedName.ciphertext.toString('hex');
+            finalNameIv    = encryptedName.iv;
+            finalNameTag   = encryptedName.authTag;
+        }
 
         // 5. Write to vault/{vault_id}/
         const storedFilename = uuidv4();
         const storagePath    = vaultStoragePath(vaultId);
         if (!fs.existsSync(storagePath)) fs.mkdirSync(storagePath, { recursive: true });
-        fs.writeFileSync(path.join(storagePath, storedFilename), encryptedFile.ciphertext);
+        fs.writeFileSync(path.join(storagePath, storedFilename), finalFileBytes);
 
         // 6. Insert metadata
         const insertRes = await pool.query(
             `INSERT INTO files
                (vault_id, owner_id, stored_filename, iv, auth_tag, key_version,
-                encrypted_name, name_iv, name_auth_tag, mime_type, file_size_bytes)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                encrypted_name, name_iv, name_auth_tag, mime_type, file_size_bytes, is_e2ee)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, $12)
              RETURNING id, created_at`,
-            [
-                vaultId,
-                req.user.sub,
-                storedFilename,
-                encryptedFile.iv,
-                encryptedFile.authTag,
-                keyVersion,
-                encryptedName.ciphertext.toString('hex'),
-                encryptedName.iv,
-                encryptedName.authTag,
-                mimetype,
-                buffer.length,
-            ]
+            [vaultId, req.user.sub, storedFilename, finalIv, finalTag, keyVersion,
+             finalEncName, finalNameIv, finalNameTag, mimetype, buffer.length, isE2EE]
         );
 
         // 7. Tamper-evident audit log
@@ -146,13 +157,13 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
-// GET /api/files  — list files (decrypted names)
+// GET /api/files  — list files
 // ══════════════════════════════════════════════
 router.get('/', protect, async (req, res) => {
     try {
         const result = await pool.query(
             `SELECT id, encrypted_name, name_iv, name_auth_tag,
-                    mime_type, file_size_bytes, key_version, created_at
+                    mime_type, file_size_bytes, key_version, is_e2ee, created_at
              FROM files
              WHERE vault_id = $1 AND is_deleted = FALSE
              ORDER BY created_at DESC`,
@@ -160,44 +171,34 @@ router.get('/', protect, async (req, res) => {
         );
 
         const files = result.rows.map(row => {
+            if (row.is_e2ee) {
+                return {
+                    id           : row.id,
+                    name         : row.encrypted_name,
+                    name_iv      : row.name_iv,
+                    name_auth_tag: row.name_auth_tag,
+                    mime_type    : row.mime_type,
+                    size_bytes   : row.file_size_bytes,
+                    is_e2ee      : true,
+                    created_at   : row.created_at,
+                };
+            }
             try {
                 const nameBuffer = decryptData(
                     Buffer.from(row.encrypted_name, 'hex'),
-                    row.name_iv,
-                    row.name_auth_tag,
-                    req.vaultKey,
-                    row.key_version
+                    row.name_iv, row.name_auth_tag, req.vaultKey, row.key_version
                 );
                 return {
-                    id        : row.id,
-                    name      : nameBuffer.toString('utf8'),
-                    mime_type : row.mime_type,
-                    size_bytes: row.file_size_bytes,
-                    created_at: row.created_at,
+                    id: row.id, name: nameBuffer.toString('utf8'), mime_type: row.mime_type,
+                    size_bytes: row.file_size_bytes, is_e2ee: false, created_at: row.created_at,
                 };
             } catch {
-                return {
-                    id        : row.id,
-                    name      : '[encrypted]',
-                    mime_type : row.mime_type,
-                    size_bytes: row.file_size_bytes,
-                    created_at: row.created_at,
-                };
+                return { id: row.id, name: '[encrypted]', is_e2ee: false, created_at: row.created_at };
             }
         });
 
-        await writeAuditLog({
-            userId : req.user.sub,
-            action : 'file_view',
-            ip     : req.ip,
-            success: true,
-            metadata: { vault_id: req.vaultId },
-        });
-
         return res.json({ files });
-
     } catch (err) {
-        console.error('List error:', err);
         return res.status(500).json({ error: 'Could not retrieve files' });
     }
 });
@@ -208,7 +209,6 @@ router.get('/', protect, async (req, res) => {
 router.get('/:id/view', protect, async (req, res) => {
     try {
         const { id } = req.params;
-
         const result = await pool.query(
             `SELECT * FROM files WHERE id = $1 AND vault_id = $2 AND is_deleted = FALSE`,
             [id, req.vaultId]
@@ -217,40 +217,33 @@ router.get('/:id/view', protect, async (req, res) => {
 
         const file     = result.rows[0];
         const filePath = path.join(vaultStoragePath(req.vaultId), file.stored_filename);
-
-        if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing from storage' });
+        if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing' });
 
         const encryptedBytes = fs.readFileSync(filePath);
-        const decrypted = decryptData(
-            encryptedBytes,
-            file.iv,
-            file.auth_tag,
-            req.vaultKey,
-            file.key_version
-        );
+        let finalBuffer;
+
+        if (file.is_e2ee) {
+            finalBuffer = encryptedBytes;
+        } else {
+            finalBuffer = decryptData(encryptedBytes, file.iv, file.auth_tag, req.vaultKey, file.key_version);
+        }
 
         res.set({
-            'Content-Type'           : file.mime_type,
-            'Content-Length'         : decrypted.length,
-            'Cache-Control'          : 'no-store, no-cache, must-revalidate, private',
-            'Pragma'                 : 'no-cache',
-            'X-Content-Type-Options' : 'nosniff',
+            'Content-Type'  : file.mime_type,
+            'Content-Length': finalBuffer.length,
+            'X-E2EE'        : file.is_e2ee ? 'true' : 'false',
+            'X-IV'          : file.iv,
+            'X-Auth-Tag'    : file.auth_tag
         });
 
         await writeAuditLog({
-            userId : req.user.sub,
-            action : 'file_view',
-            fileId : id,
-            ip     : req.ip,
-            success: true,
-            metadata: { vault_id: req.vaultId },
+            userId: req.user.sub, action: 'file_view', fileId: id,
+            ip: req.ip, success: true, metadata: { vault_id: req.vaultId },
         });
 
-        return res.send(decrypted);
-
+        return res.send(finalBuffer);
     } catch (err) {
-        console.error('View error:', err);
-        return res.status(500).json({ error: 'Could not decrypt file' });
+        return res.status(500).json({ error: 'Could not retrieve file' });
     }
 });
 

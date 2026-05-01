@@ -37,6 +37,9 @@ async function verifyVaultMember(req, res, next) {
         req.vaultId     = vault_id;
         req.vaultStatus = status;
 
+        // Set app.vault_id for RLS policies (session-scoped, overwritten each request)
+        await pool.query('SELECT set_config($1, $2, false)', ['app.vault_id', vault_id]);
+
         // Decrypt vault key — legacy vaults use global env key (handled by routes)
         if (encrypted_key === 'LEGACY') {
             req.vaultKey = null; // routes check for null and fall back to crypto.js getKey()
