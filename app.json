@@ -2,7 +2,7 @@
   "expo": {
     "name": "Valut",
     "slug": "couple-vault-app",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "couplevaultapp",
@@ -22,6 +22,7 @@
       "predictiveBackGestureEnabled": false,
       "softwareKeyboardLayoutMode": "pan",
       "package": "com.subbu1190.couplevaultapp",
+      "versionCode": 2,
       "googleServicesFile": "./google-services.json"
     },
     "androidStatusBar": {
