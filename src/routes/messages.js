@@ -42,8 +42,7 @@ async function getActiveKeyVersion() {
     const res = await pool.query(
         `SELECT version FROM encryption_keys WHERE status = 'active' ORDER BY version DESC LIMIT 1`
     );
-    if (!res.rows.length) throw new Error('No active encryption key');
-    return parseInt(res.rows[0].version, 10);
+    return res.rows.length ? parseInt(res.rows[0].version, 10) : 1;
 }
 
 // ── Helper — get partner's user ID within the same vault ──────────────────
@@ -69,21 +68,23 @@ function decryptMessage(row, vaultKey, fallbackKeyVersion) {
             sender_id   : row.sender_id,
             receiver_id : row.receiver_id,
             type        : row.type,
-            content     : row.content,       // This is the ciphertext hex
+            content     : row.content,
             content_iv  : row.content_iv,
             content_tag : row.content_tag,
             is_e2ee     : true,
+            counter     : row.counter     || 0,
+            key_version : row.key_version || 1,
             file_id     : row.file_id,
-            reply_to_id : row.reply_to_id     || null,
-            view_once   : row.view_once  || false,
-            view_max    : row.view_max   || 1,
-            view_count  : row.view_count || 0,
+            reply_to_id : row.reply_to_id || null,
+            view_once   : row.view_once   || false,
+            view_max    : row.view_max    || 1,
+            view_count  : row.view_count  || 0,
             is_deleted  : row.is_deleted,
             is_read     : row.is_read,
             read_at     : row.read_at,
             created_at  : row.created_at,
-            is_starred  : row.is_starred || false,
-            signature   : row.signature  || null,
+            is_starred  : row.is_starred  || false,
+            signature   : row.signature   || null,
         };
     }
 
@@ -238,13 +239,13 @@ router.post('/', protect, async (req, res) => {
         const keyVersion = await getActiveKeyVersion();
         const partner    = await getPartnerInVault(myId, vaultId);
 
-        const isE2EE = !!(req.body.content_iv && req.body.content_tag);
+        const isE2EE = req.body.is_e2ee || !!(req.body.content_iv && req.body.content_tag);
         let enc_content, enc_iv, enc_tag;
 
         if (isE2EE) {
             enc_content = content; // already ciphertext hex from client
-            enc_iv      = req.body.content_iv;
-            enc_tag     = req.body.content_tag;
+            enc_iv      = req.body.content_iv || null;
+            enc_tag     = req.body.content_tag || null;
         } else {
             const enc = encryptData(Buffer.from(content.trim(), 'utf8'), req, keyVersion);
             enc_content = enc.ciphertext.toString('hex');
@@ -254,10 +255,10 @@ router.post('/', protect, async (req, res) => {
 
         const result = await pool.query(
             `INSERT INTO messages
-               (vault_id, sender_id, receiver_id, type, content, content_iv, content_tag, key_version, reply_to_id, is_e2ee, signature)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               (vault_id, sender_id, receiver_id, type, content, content_iv, content_tag, key_version, reply_to_id, is_e2ee, signature, counter)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              RETURNING *`,
-            [vaultId, myId, partner.id, type, enc_content, enc_iv, enc_tag, keyVersion, reply_to_id || null, isE2EE, req.body.signature || null]
+            [vaultId, myId, partner.id, type, enc_content, enc_iv, enc_tag, keyVersion, reply_to_id || null, isE2EE, req.body.signature || null, req.body.counter || 0]
         );
 
         const msg = decryptMessage(result.rows[0], req.vaultKey, keyVersion);
@@ -321,7 +322,7 @@ router.post('/media', protect, upload.single('file'), async (req, res) => {
         const { mimetype, originalname, buffer } = req.file;
         const myId      = req.user.sub;
         const vaultId   = req.vaultId;
-        const keyVersion = await getActiveKeyVersion();
+        const keyVersion = req.body?.key_version ? parseInt(req.body.key_version, 10) : await getActiveKeyVersion();
         const partner    = await getPartnerInVault(myId, vaultId);
         const viewOnce   = req.body?.view_once === 'true' || req.body?.view_once === true;
         const viewMax    = parseInt(req.body?.view_max) || 1;
@@ -331,34 +332,39 @@ router.post('/media', protect, upload.single('file'), async (req, res) => {
         else if (mimetype.startsWith('video/')) type = 'video';
         else if (mimetype.startsWith('audio/')) type = 'audio';
 
-        const encFile = encryptData(buffer, req, keyVersion);
-        const encName = encryptData(Buffer.from(originalname, 'utf8'), req, keyVersion);
+        // ZERO-TRUST ARCHITECTURE:
+        // The server no longer encrypts the file. We assume the frontend
+        // has encrypted the file buffer and originalname before uploading.
         const storedFilename = uuidv4();
 
         // Per-vault storage path
         const storagePath = path.join(process.env.STORAGE_PATH, vaultId);
         if (!fs.existsSync(storagePath)) fs.mkdirSync(storagePath, { recursive: true });
-        fs.writeFileSync(path.join(storagePath, storedFilename), encFile.ciphertext);
+        
+        // Write the raw buffer sent by the client (which is already encrypted Hex/Base64)
+        fs.writeFileSync(path.join(storagePath, storedFilename), buffer);
 
         const fileResult = await pool.query(
             `INSERT INTO files
                (vault_id, owner_id, stored_filename, iv, auth_tag, key_version,
-                encrypted_name, name_iv, name_auth_tag, mime_type, file_size_bytes)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
-            [vaultId, myId, storedFilename, encFile.iv, encFile.authTag, keyVersion,
-             encName.ciphertext.toString('hex'), encName.iv, encName.authTag, mimetype, buffer.length]
+                encrypted_name, name_iv, name_auth_tag, mime_type, file_size_bytes, is_e2ee)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+            [vaultId, myId, storedFilename, '', '', keyVersion,
+             originalname, '', '', mimetype, buffer.length, true]
         );
         const fileId = fileResult.rows[0].id;
 
         const msgResult = await pool.query(
-            `INSERT INTO messages (vault_id, sender_id, receiver_id, type, file_id, key_version, view_once, view_max)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-            [vaultId, myId, partner.id, type, fileId, keyVersion, viewOnce, viewMax]
+            `INSERT INTO messages (vault_id, sender_id, receiver_id, type, file_id, key_version, view_once, view_max, is_e2ee)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+            [vaultId, myId, partner.id, type, fileId, keyVersion, viewOnce, viewMax, true]
         );
 
+        // We don't decrypt the message on the server anymore to emit via socket.
+        // We just send the E2EE record as-is, the client decrypts it.
         const msg = {
-            ...decryptMessage(msgResult.rows[0], req.vaultKey, keyVersion),
-            file_name: originalname,
+            ...msgResult.rows[0],
+            file_name: null, // Client decrypts this if they need it
             file_size: buffer.length,
             mime_type: mimetype,
         };

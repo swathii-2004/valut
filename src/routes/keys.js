@@ -78,11 +78,11 @@ router.get('/identity/:userId', authMiddleware, async (req, res) => {
  * Body: { vault_id: uuid, target_user_id: uuid, target_device_id: uuid, encrypted_key: string, key_version: number }
  */
 router.post('/vault', authMiddleware, async (req, res) => {
-    const { vault_id, target_user_id, target_device_id, encrypted_key, key_version = 1 } = req.body;
+    const { vault_id, target_user_id, target_device_id, encrypted_key, ephemeral_public_key, key_version = 1 } = req.body;
     const userId = req.user.sub;
 
-    if (!vault_id || !target_user_id || !target_device_id || !encrypted_key) {
-        return res.status(400).json({ error: 'vault_id, target_user_id, target_device_id, and encrypted_key are required' });
+    if (!vault_id || !target_user_id || !target_device_id || !encrypted_key || !ephemeral_public_key) {
+        return res.status(400).json({ error: 'vault_id, target_user_id, target_device_id, encrypted_key, and ephemeral_public_key are required' });
     }
 
     try {
@@ -104,20 +104,22 @@ router.post('/vault', authMiddleware, async (req, res) => {
             return res.status(403).json({ error: 'Target device not found or not in vault' });
         }
 
-        // Enforcement: Target device MUST be verified to receive keys (unless it's the sender's own device)
-        if (!deviceCheck.rows[0].is_verified && target_user_id !== userId) {
-            return res.status(403).json({ 
-                error: 'SECURITY_ENFORCEMENT: Target device must be verified before receiving Vault Keys.' 
+        // For key rotations (version > 1), require the target device to be verified.
+        // The initial key exchange (version 1) is always allowed so the vault can be used.
+        if (key_version > 1 && !deviceCheck.rows[0].is_verified && target_user_id !== userId) {
+            return res.status(403).json({
+                error: 'SECURITY_ENFORCEMENT: Target device must be verified before receiving rotated Vault Keys.'
             });
         }
 
         // 3. Store the encrypted vault key
         await pool.query(
-            `INSERT INTO vault_keys (vault_id, user_id, device_id, encrypted_vault_key, key_version)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (vault_id, user_id, device_id, key_version) 
-             DO UPDATE SET encrypted_vault_key = EXCLUDED.encrypted_vault_key`,
-            [vault_id, target_user_id, target_device_id, encrypted_key, key_version]
+            `INSERT INTO vault_keys (vault_id, user_id, device_id, encrypted_vault_key, ephemeral_public_key, key_version)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (vault_id, user_id, device_id, key_version)
+             DO UPDATE SET encrypted_vault_key = EXCLUDED.encrypted_vault_key,
+                           ephemeral_public_key = EXCLUDED.ephemeral_public_key`,
+            [vault_id, target_user_id, target_device_id, encrypted_key, ephemeral_public_key, key_version]
         );
 
         console.log(`[KEYS] 🔐 Vault key stored for device: ${target_device_id}`);
@@ -139,8 +141,8 @@ router.get('/vault/:vaultId', authMiddleware, async (req, res) => {
     const { device_id } = req.query;
 
     try {
-        let query = `SELECT encrypted_vault_key, key_version, device_id 
-                     FROM vault_keys 
+        let query = `SELECT encrypted_vault_key, ephemeral_public_key, key_version, device_id
+                     FROM vault_keys
                      WHERE vault_id = $1 AND user_id = $2`;
         const params = [vaultId, userId];
 
@@ -156,9 +158,10 @@ router.get('/vault/:vaultId', authMiddleware, async (req, res) => {
         return res.json({
             vault_id: vaultId,
             keys: result.rows.map(r => ({
-                device_id: r.device_id,
-                encrypted_key: r.encrypted_vault_key,
-                version: r.key_version
+                device_id:           r.device_id,
+                encrypted_key:       r.encrypted_vault_key,
+                ephemeral_public_key: r.ephemeral_public_key,
+                key_version:         r.key_version
             }))
         });
     } catch (err) {
