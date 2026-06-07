@@ -624,3 +624,4 @@ Implemented **Row Level Security (RLS)** at the PostgreSQL level to ensure stric
 - [ ] Streaming decryption for media playback.
 
 *Roadmap formalized May 1, 2026.*
+
