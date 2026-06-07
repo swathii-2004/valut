@@ -164,61 +164,44 @@ const isBirthdayMessage = (text) => {
 };
 
 // ── Message Bubble ────────────────────────────────────────
-const MessageBubble = React.memo(({ msg, myId, token, C, isVisible, onLongPress, onImagePress, onSwipeToReply, onQuotePress }) => {
+const MessageBubble = React.memo(({ msg, myId, token, C, onLongPress, onImagePress, onSwipeToReply, onQuotePress }) => {
   // Helper: build authenticated media URL using ?token= query param
   // (expo-image on Android ignores custom Authorization headers for image sources)
   const mediaUrl = (fileId) => `${BASE_URL}/api/files/${fileId}/view?token=${token}`;
 
   const [decryptedUri, setDecryptedUri] = useState(null);
-  const { vaultKeyMap, vaultId: authVaultId } = useAuth();
+  const { vaultKeyMap } = useAuth(); // We'll need the keys here too
 
   useEffect(() => {
-    if (msg.type !== 'image' || !msg.is_e2ee || !msg.file_id || decryptedUri) return;
-
-    // Sender's own just-uploaded image: content IS the base64 already — no round-trip needed
-    if (msg.decrypted && msg.content && !msg.content.startsWith('[')) {
-      setDecryptedUri(`data:${msg.mime_type || 'image/jpeg'};base64,${msg.content}`);
-      return;
+    if (msg.type === 'image' && msg.is_e2ee && msg.file_id && !decryptedUri) {
+      decryptImage();
     }
+  }, [msg.file_id]);
 
-    const vKey = vaultKeyMap[msg.key_version || 1];
-    console.log('[IMG] file_id:', msg.file_id, 'kv:', msg.key_version, 'vaultId:', authVaultId, 'vKey:', !!vKey);
-    if (!vKey || !authVaultId) return; // retry fires when vaultKeyMap or authVaultId changes
+  const decryptImage = async () => {
+    try {
+      const vKey = vaultKeyMap[msg.key_version || 1];
+      if (!vKey) return;
 
-    (async () => {
-      try {
-        const url = mediaUrl(msg.file_id);
-        console.log('[IMG] fetching:', url);
-        const res = await fetch(url);
-        console.log('[IMG] fetch status:', res.status);
-        if (!res.ok) { console.warn('[IMG] fetch failed:', res.status); return; }
+      const url = mediaUrl(msg.file_id);
+      const res = await fetch(url);
+      const rawFile = await res.text();
+      const encryptedPayload = JSON.parse(rawFile); // { blob, signature, counter }
 
-        const rawFile = await res.text();
-        let payload;
-        try {
-          payload = JSON.parse(rawFile);
-        } catch {
-          console.warn('[IMG] response is not JSON — not E2EE or corrupt');
-          return;
-        }
+      const { decryptMessage } = require('../utils/crypto');
+      const aad = {
+        metadata: { v: authVaultId, s: msg.sender_id },
+        c: encryptedPayload.counter,
+        signature: encryptedPayload.signature,
+        partnerSigningPublicKey: msg.sender_id === myId ? null : partnerSigningKey
+      };
 
-        console.log('[IMG] blob type:', typeof payload?.blob, 'counter:', payload?.counter);
-        if (!payload?.blob) { console.warn('[IMG] missing blob in payload'); return; }
-
-        const aad = {
-          metadata: { v: authVaultId, s: msg.sender_id },
-          c: payload.counter,
-          signature: payload.signature,
-          partnerSigningPublicKey: null
-        };
-        const result = decryptMessage(payload.blob, vKey, -1, aad);
-        console.log('[IMG] decrypted length:', result?.text?.length);
-        setDecryptedUri(`data:${msg.mime_type || 'image/jpeg'};base64,${result.text}`);
-      } catch (e) {
-        console.warn('[IMG] ❌ decryption failed:', e.message);
-      }
-    })();
-  }, [msg.file_id, msg.decrypted, msg.content, vaultKeyMap, authVaultId]);
+      const decrypted = decryptMessage(encryptedPayload.blob, vKey, -1, aad); // -1 to skip strict replay for media view
+      setDecryptedUri(`data:${msg.mime_type || 'image/jpeg'};base64,${decrypted.text}`);
+    } catch (e) {
+      console.warn('[E2EE] ❌ Image decryption failed:', e.message);
+    }
+  };
 
   const isMine = msg.sender_id === myId;
   const reactions = msg.reactions?.filter(r => r.emoji) || [];
@@ -368,7 +351,7 @@ const MessageBubble = React.memo(({ msg, myId, token, C, isVisible, onLongPress,
               />
               {msg.is_e2ee && !decryptedUri && (
                 <View style={[StyleSheet.absoluteFill, { justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.1)' }]}>
-                   <ActivityIndicator size="small" color={C.accent} />
+                  <ActivityIndicator size="small" color={C.accent} />
                 </View>
               )}
             </Pressable>
@@ -515,34 +498,35 @@ function VoiceBubble({ msg, myId, token, C }) {
   const load = async () => {
     if (soundRef.current) return;
     await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
-    
+
     let playableUri = `${BASE_URL}/api/files/${msg.file_id}/view?token=${token}`;
 
     if (msg.is_e2ee) {
       try {
         const vKey = vaultKeyMap[msg.key_version || 1];
         if (!vKey) throw new Error('Missing vault key');
-        
+
         const res = await fetch(playableUri);
         const rawFile = await res.text();
         const encryptedPayload = JSON.parse(rawFile);
-        
+
+        const { decryptMessage } = require('../utils/crypto');
         const aad = {
           metadata: { v: authVaultId, s: msg.sender_id },
           c: encryptedPayload.counter,
-          signature: encryptedPayload.signature, 
+          signature: encryptedPayload.signature,
           partnerSigningPublicKey: msg.sender_id === myId ? null : partnerSigningKey
         };
-        
+
         const decrypted = decryptMessage(encryptedPayload.blob, vKey, -1, aad);
-        
+
         const tempUri = FileSystem.cacheDirectory + 'dec_voice_' + msg.file_id + '.m4a';
         await FileSystem.writeAsStringAsync(tempUri, decrypted.text, { encoding: FileSystem.EncodingType.Base64 });
         playableUri = tempUri;
       } catch (e) {
         console.warn('Audio decrypt error:', e.message);
         Alert.alert('Security Error', 'Failed to decrypt voice message.');
-        return; 
+        return;
       }
     }
 
@@ -639,7 +623,6 @@ export default function ChatScreen() {
   // E2EE State
   const { identityKey, signingKey, deviceId, vaultId: authVaultId, lastCounter, updateLastCounter, vaultKeyMap, setVaultKeyMap } = useAuth();
   const [activeKeyVersion, setActiveKeyVersion] = useState(null);
-  const [keysReady, setKeysReady] = useState(false);
   const [partnerSigningKey, setPartnerSigningKey] = useState(null);
 
   const triggerConfetti = useCallback(() => {
@@ -697,16 +680,16 @@ export default function ChatScreen() {
   const sendDoodle = async () => {
     setShowDoodle(false);
     if (!doodlePaths.length) return;
-    
+
     const svgContent = doodlePaths.map(p => `<path d="${p.path}" stroke="${p.color}" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round" />`).join('');
     const fullSvg = `<svg viewBox="0 0 ${width} ${height * 0.7}" xmlns="http://www.w3.org/2000/svg">${svgContent}</svg>`;
-    
+
     try {
       const res = await apiClient.post('/api/messages', { content: `DOODLE::${fullSvg}`, type: 'text' });
       const newMsg = res.data.message;
       if (newMsg) setMessages(prev => prev.find(m => m.id === newMsg.id) ? prev : [...prev, newMsg]);
     } catch { Alert.alert('Error', 'Failed to send doodle'); }
-    
+
     setDoodlePaths([]);
   };
 
@@ -751,11 +734,6 @@ export default function ChatScreen() {
 
   const flatListRef = useRef(null);
   const textInputRef = useRef(null);
-  const [visibleIds, setVisibleIds] = useState(new Set());
-  const viewabilityConfig = useRef({ viewAreaCoveragePercentThreshold: 20 });
-  const onViewableItemsChanged = useRef(({ viewableItems }) => {
-    setVisibleIds(new Set(viewableItems.map(v => v.item?.id).filter(Boolean)));
-  });
   const stickerListRef = useRef(null);
   const socketRef = useRef(null);
   const typingTimer = useRef(null);
@@ -774,7 +752,6 @@ export default function ChatScreen() {
       if (!m.is_e2ee || m.is_deleted) return m;
       if (m.decrypted) return m; // already decoded — skip (prevents re-feeding plaintext to cipher)
       if (String(m.id).startsWith('opt_')) return m; // optimistic message, not yet server-confirmed
-      if (m.file_id) return m; // media message — decrypted on-demand by MessageBubble/VoiceBubble
 
       const vKey = vaultKeyMap[m.key_version || 1];
       if (!vKey) return { ...m, content: '[Encrypted - Missing Key]' };
@@ -800,7 +777,7 @@ export default function ChatScreen() {
         console.warn(`[SECURITY] ❌ Cryptographic failure for msg ${m.id}:`, err.message);
         let errorLabel = '[Decryption Failed]';
         if (err.message.includes('IDENTITY')) errorLabel = '[⚠️ Identity Proof Failed]';
-        if (err.message.includes('REPLAY'))   errorLabel = '[⚠️ Replay Attack Blocked]';
+        if (err.message.includes('REPLAY')) errorLabel = '[⚠️ Replay Attack Blocked]';
         return { ...m, content: errorLabel, securityError: true };
       }
     });
@@ -825,7 +802,7 @@ export default function ChatScreen() {
   useEffect(() => {
     if (!myId) return;
     apiClient.get('/api/profile/partner').then(r => setPartnerProfile(r.data)).catch(() => { });
-    
+
     // Check for unverified partner devices
     apiClient.get('/api/devices/partner').then(r => {
       const unverified = r.data.devices.filter(d => !d.is_verified);
@@ -843,7 +820,7 @@ export default function ChatScreen() {
 
       const hasUnread = msgs.some(m => m.sender_id !== myId && !m.is_read);
       if (hasUnread) {
-        apiClient.put('/api/messages/read/all').catch(() => {});
+        apiClient.put('/api/messages/read/all').catch(() => { });
       }
 
       if (before) setMessages(prev => [...processIncomingMessages(msgs, true), ...prev]);
@@ -863,7 +840,7 @@ export default function ChatScreen() {
     return () => sub.remove();
   }, [partnerId, fetchMessages]);
 
-  useEffect(() => { if (myId && keysReady) fetchMessages(); }, [myId, keysReady]);
+  useEffect(() => { if (myId) fetchMessages(); }, [myId]);
 
   // Re-decrypt all messages once vault keys arrive (fixes race condition on app reopen)
   const vaultKeyMapRef = useRef({});
@@ -878,14 +855,14 @@ export default function ChatScreen() {
 
   // --- E2EE KEY BOOTSTRAP ---
   useEffect(() => {
-    if (!authVaultId || !identityKey) { setKeysReady(true); return; }
+    if (!authVaultId || !identityKey) return;
 
     const bootstrapVaultKeys = async () => {
       try {
         console.log('[E2EE] 🔑 Fetching Vault Keys...');
         const res = await apiClient.get(`/api/keys/vault/${authVaultId}`);
         const keys = res.data.keys || [];
-        
+
         const map = {};
         let maxVer = 0;
 
@@ -901,11 +878,9 @@ export default function ChatScreen() {
 
         setVaultKeyMap(map);
         setActiveKeyVersion(maxVer);
-        setKeysReady(true);
         console.log('[E2EE] ✅ Vault Keys Ready. Active Version:', maxVer);
       } catch (err) {
         console.error('[E2EE] ❌ Failed to load vault keys:', err.message);
-        setKeysReady(true); // unblock UI even on failure — messages show as [Missing Key]
       }
     };
 
@@ -915,7 +890,7 @@ export default function ChatScreen() {
     if (partnerId) {
       apiClient.get(`/api/keys/identity/${partnerId}`).then(r => {
         setPartnerSigningKey(r.data.signing_public_key);
-      }).catch(() => {});
+      }).catch(() => { });
     }
   }, [authVaultId, identityKey, partnerId]);
 
@@ -1021,45 +996,45 @@ export default function ChatScreen() {
 
     try {
       console.log(`[E2EE] 🔐 Encrypting & Signing (Counter: ${currentCounter})...`);
-        const aad = { 
-          metadata: { v: authVaultId, s: myId },
-          signingPrivateKey: signingKey
-        };
-        const encrypted = encryptMessage(trimmed, vKey, currentCounter, aad);
-        payload = encrypted.blob;
-        signature = encrypted.signature;
-        isE2EE = true;
-        updateLastCounter(currentCounter);
+      const aad = {
+        metadata: { v: authVaultId, s: myId },
+        signingPrivateKey: signingKey
+      };
+      const encrypted = encryptMessage(trimmed, vKey, currentCounter, aad);
+      payload = encrypted.blob;
+      signature = encrypted.signature;
+      isE2EE = true;
+      updateLastCounter(currentCounter);
 
-        // AUTO-ROTATION: Every 100 messages, trigger a key rotation for Forward Secrecy
-        if (currentCounter % 100 === 0) {
-          console.log('[SECURITY] 🔄 Auto-rotating Vault Key (100 messages reached)...');
-          (async () => {
-            try {
-              // Fetch latest trusted devices (Partner + Me)
-              const [resMy, resPartner] = await Promise.all([
-                apiClient.get('/api/devices'),
-                apiClient.get('/api/devices/partner')
-              ]);
-              const allTrusted = [
-                ...resMy.data.devices,
-                ...resPartner.data.devices.filter(d => d.is_verified)
-              ];
+      // AUTO-ROTATION: Every 100 messages, trigger a key rotation for Forward Secrecy
+      if (currentCounter % 100 === 0) {
+        console.log('[SECURITY] 🔄 Auto-rotating Vault Key (100 messages reached)...');
+        (async () => {
+          try {
+            // Fetch latest trusted devices (Partner + Me)
+            const [resMy, resPartner] = await Promise.all([
+              apiClient.get('/api/devices'),
+              apiClient.get('/api/devices/partner')
+            ]);
+            const allTrusted = [
+              ...resMy.data.devices,
+              ...resPartner.data.devices.filter(d => d.is_verified)
+            ];
 
-              const nextVer = activeKeyVersion + 1;
-              const rotation = await rotateVaultKey(authVaultId, identityKey, allTrusted, nextVer);
-              
-              // Upload new keys
-              await Promise.all(rotation.payloads.map(p => apiClient.post('/api/keys/vault', p)));
-              console.log('[SECURITY] ✅ Auto-rotation complete.');
-            } catch (err) {
-              console.warn('[SECURITY] ⚠️ Auto-rotation failed:', err.message);
-            }
-          })();
-        }
-      } catch (err) {
-        console.warn('[E2EE] ⚠️ Encryption failed:', err.message);
+            const nextVer = activeKeyVersion + 1;
+            const rotation = await rotateVaultKey(authVaultId, identityKey, allTrusted, nextVer);
+
+            // Upload new keys
+            await Promise.all(rotation.payloads.map(p => apiClient.post('/api/keys/vault', p)));
+            console.log('[SECURITY] ✅ Auto-rotation complete.');
+          } catch (err) {
+            console.warn('[SECURITY] ⚠️ Auto-rotation failed:', err.message);
+          }
+        })();
       }
+    } catch (err) {
+      console.warn('[E2EE] ⚠️ Encryption failed:', err.message);
+    }
     // Optimistic append: show message immediately before server responds
     const optimisticId = `opt_${Date.now()}`;
     const optimisticMsg = {
@@ -1070,10 +1045,10 @@ export default function ChatScreen() {
       reply_to: savedReplyTo ? { id: savedReplyTo.id, content: savedReplyTo.content, type: savedReplyTo.type } : null,
     };
     setMessages(prev => [...prev, optimisticMsg]);
-    
+
     try {
-      const res = await apiClient.post('/api/messages', { 
-        content: payload, 
+      const res = await apiClient.post('/api/messages', {
+        content: payload,
         signature: signature,
         counter: currentCounter,
         reply_to_id: savedReplyTo?.id || null,
@@ -1206,11 +1181,12 @@ export default function ChatScreen() {
       const vaultKey = vaultKeyMap[activeVersion];
       if (!vaultKey) throw new Error('Missing vault key for encryption');
 
+
       const nextCounter = lastCounter + 1;
       updateLastCounter(nextCounter);
 
       const base64Data = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 });
-      
+
       const encrypted = encryptMessage(base64Data, vaultKey, nextCounter, {
         metadata: { v: authVaultId, s: myId },
         signingPrivateKey: signingKey
@@ -1221,7 +1197,6 @@ export default function ChatScreen() {
 
       const formData = new FormData();
       formData.append('file', { uri: tempUri, name: file.name, type: file.mimeType });
-      formData.append('key_version', String(activeVersion));
       if (isViewOnce) {
         formData.append('view_once', 'true');
         formData.append('view_max', String(vMax));
@@ -1237,15 +1212,15 @@ export default function ChatScreen() {
       const newMsg = res.data.message;
       if (newMsg) {
         // Pre-fill the decrypted payload locally so we don't have to fetch it immediately
-        newMsg.content = base64Data; 
+        newMsg.content = base64Data;
         newMsg.decrypted = true;
         setMessages(prev => prev.find(m => m.id === newMsg.id) ? prev : [...prev, newMsg]);
       }
     } catch (err) {
       console.warn('File send error:', err);
       Alert.alert('Error', 'Failed to encrypt or send file');
-    } finally { 
-      setUploadProgress(0); 
+    } finally {
+      setUploadProgress(0);
     }
   };
 
@@ -1292,7 +1267,7 @@ export default function ChatScreen() {
       updateLastCounter(nextCounter);
 
       const base64Data = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
-      
+
       const encrypted = encryptMessage(base64Data, vaultKey, nextCounter, {
         metadata: { v: authVaultId, s: myId },
         signingPrivateKey: signingKey
@@ -1304,7 +1279,6 @@ export default function ChatScreen() {
       const name = `voice_${Date.now()}.m4a`;
       const formData = new FormData();
       formData.append('file', { uri: tempUri, name, type: 'audio/mp4' });
-      formData.append('key_version', String(activeVersion));
 
       const res = await apiClient.post('/api/messages/media', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
       const newMsg = res.data.message;
@@ -1315,7 +1289,7 @@ export default function ChatScreen() {
       }
     } catch (err) {
       console.warn('Audio error:', err);
-      Alert.alert('Error', 'Failed to encrypt or send voice message'); 
+      Alert.alert('Error', 'Failed to encrypt or send voice message');
     }
   };
 
@@ -1363,28 +1337,11 @@ export default function ChatScreen() {
   };
 
   // ── Socket events ──────────────────────────────────────────
-  const handleLongPress = useCallback((msg) => {
+  const handleLongPress = (msg) => {
     if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setSelectedMsg(msg);
     setShowActions(true);
-  }, []);
-
-  const handleSwipeToReply = useCallback((m) => {
-    if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setReplyTo(m);
-  }, []);
-
-  const handleQuotePress = useCallback((id) => {
-    const idx = listData.findIndex(x => x.id === id);
-    if (idx !== -1) flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 });
-  }, [listData]);
-
-  const handleImagePress = useCallback((m) => {
-    router.push({
-      pathname: '/view',
-      params: { id: m.file_id, name: m.file_name || 'File', mime: m.mime_type || 'image/jpeg', is_e2ee: m.is_e2ee ? 'true' : 'false', key_version: String(m.key_version || 1), sender_id: m.sender_id },
-    });
-  }, []);
+  };
 
   const doReaction = async (emoji) => {
     setShowActions(false);
@@ -1504,10 +1461,10 @@ export default function ChatScreen() {
   return (
     <KeyboardAvoidingView style={[s.root, { backgroundColor: C.bg }]} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}>
       <ConfettiOverlay active={showConfetti} />
-      
+
       {unverifiedPartnerDevices.length > 0 && (
-        <TouchableOpacity 
-          style={[s.trustBanner, { backgroundColor: C.accent }]} 
+        <TouchableOpacity
+          style={[s.trustBanner, { backgroundColor: C.accent }]}
           onPress={() => router.push('/settings/devices')}
         >
           <Ionicons name="warning" size={16} color="#000" />
@@ -1597,7 +1554,7 @@ export default function ChatScreen() {
       )}
 
       {/* ── Messages ── */}
-      {loading || !keysReady ? (
+      {loading ? (
         <View style={s.center}><ActivityIndicator color={C.accent} size="large" /></View>
       ) : (
         <FlatList
@@ -1614,20 +1571,23 @@ export default function ChatScreen() {
             return (
               <MessageBubble
                 msg={item} myId={myId} token={accessToken} C={C}
-                isVisible={visibleIds.has(item.id)}
                 onLongPress={handleLongPress}
-                onSwipeToReply={handleSwipeToReply}
-                onQuotePress={handleQuotePress}
-                onImagePress={handleImagePress}
+                onSwipeToReply={(m) => {
+                  if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setReplyTo(m);
+                }}
+                onQuotePress={(id) => {
+                  const idx = listData.findIndex(x => x.id === id);
+                  if (idx !== -1) flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 });
+                }}
+                onImagePress={(m) => router.push({
+                  pathname: '/view',
+                  params: { id: m.file_id, name: m.file_name || 'File', mime: m.mime_type || 'image/jpeg' },
+                })}
               />
             );
           }}
           onEndReachedThreshold={0.1} onEndReached={loadMore}
-          windowSize={5}
-          maxToRenderPerBatch={10}
-          removeClippedSubviews={true}
-          onViewableItemsChanged={onViewableItemsChanged.current}
-          viewabilityConfig={viewabilityConfig.current}
           ListHeaderComponent={loadingMore ? <ActivityIndicator color={C.accent} style={{ margin: 16 }} /> : null}
           ListEmptyComponent={
             <View style={s.emptyWrap}>
@@ -1935,7 +1895,7 @@ export default function ChatScreen() {
               <Text style={s.previewSendText}>Send ↑</Text>
             </TouchableOpacity>
           </View>
-          
+
           <View style={{ flex: 1, backgroundColor: C.surface }} {...panResponder.panHandlers}>
             <Svg style={{ flex: 1 }}>
               {doodlePaths.map((p, i) => (
@@ -1954,10 +1914,10 @@ export default function ChatScreen() {
             </TouchableOpacity>
             <View style={{ flexDirection: 'row', gap: 12, flex: 1, justifyContent: 'center' }}>
               {['#E4387A', '#000000', '#FFFFFF', '#4A90E2', '#50E3C2', '#F5A623'].map(c => (
-                <TouchableOpacity 
-                  key={c} 
+                <TouchableOpacity
+                  key={c}
                   onPress={() => setDoodleColor(c)}
-                  style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: c, borderWidth: 2, borderColor: doodleColor === c ? (c === '#FFFFFF' ? '#000' : '#FFF') : 'transparent', elevation: doodleColor === c ? 4 : 0 }} 
+                  style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: c, borderWidth: 2, borderColor: doodleColor === c ? (c === '#FFFFFF' ? '#000' : '#FFF') : 'transparent', elevation: doodleColor === c ? 4 : 0 }}
                 />
               ))}
             </View>
@@ -1982,7 +1942,7 @@ export default function ChatScreen() {
               <Text style={s.previewSendText}>Send ↑</Text>
             </TouchableOpacity>
           </View>
-          
+
           <View style={{ flex: 1, backgroundColor: C.surface }} {...panResponder.panHandlers}>
             <Svg style={{ flex: 1 }}>
               {doodlePaths.map((p, i) => (
@@ -2001,10 +1961,10 @@ export default function ChatScreen() {
             </TouchableOpacity>
             <View style={{ flexDirection: 'row', gap: 12, flex: 1, justifyContent: 'center' }}>
               {['#E4387A', '#000000', '#FFFFFF', '#4A90E2', '#50E3C2', '#F5A623'].map(c => (
-                <TouchableOpacity 
-                  key={c} 
+                <TouchableOpacity
+                  key={c}
                   onPress={() => setDoodleColor(c)}
-                  style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: c, borderWidth: 2, borderColor: doodleColor === c ? (c === '#FFFFFF' ? '#000' : '#FFF') : 'transparent', elevation: doodleColor === c ? 4 : 0 }} 
+                  style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: c, borderWidth: 2, borderColor: doodleColor === c ? (c === '#FFFFFF' ? '#000' : '#FFF') : 'transparent', elevation: doodleColor === c ? 4 : 0 }}
                 />
               ))}
             </View>
